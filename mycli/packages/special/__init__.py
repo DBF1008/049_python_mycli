@@ -1,0 +1,129 @@
+import os
+
+from mycli.packages.special.dbcommands import (
+    list_databases,
+    list_tables,
+    status,
+)
+from mycli.packages.special.iocommands import (
+    clip_command,
+    close_tee,
+    copy_query_to_clipboard,
+    disable_pager,
+    disable_show_warnings,
+    editor_command,
+    enable_show_warnings,
+    flush_pipe_once_if_written,
+    forced_horizontal,
+    get_clip_query,
+    get_current_delimiter,
+    get_editor_query,
+    get_filename,
+    is_expanded_output,
+    is_pager_enabled,
+    is_redirected,
+    is_show_favorite_query,
+    is_show_warnings_enabled,
+    is_timing_enabled,
+    open_external_editor,
+    set_delimiter,
+    set_destructive_keywords,
+    set_expanded_output,
+    set_favorite_queries,
+    set_forced_horizontal_output,
+    set_pager,
+    set_pager_enabled,
+    set_redirect,
+    set_show_favorite_query,
+    set_show_warnings_enabled,
+    set_timing_enabled,
+    split_queries,
+    unset_once_if_written,
+    write_once,
+    write_pipe_once,
+    write_tee,
+)
+
+if not os.environ.get('MYCLI_LLM_OFF'):
+    from mycli.packages.special.llm import (
+        FinishIteration,
+        handle_llm,
+        is_llm_command,
+        sql_using_llm,
+    )
+else:
+
+    class FinishIteration(Exception):  # type: ignore[no-redef]
+        def __init__(self, results=None):
+            self.results = results
+
+    def is_llm_command(command: str) -> bool:  # type: ignore[no-redef]
+        return False
+
+    def handle_llm(*args, **kwargs):  # type: ignore[no-redef, misc]
+        raise FinishIteration(results=None)
+
+    def sql_using_llm(*args, **kwargs):  # type: ignore[no-redef, misc]
+        raise FinishIteration(results=None)
+
+
+from mycli.packages.special.main import (
+    CommandNotFound,
+    SpecialCommandAlias,
+    execute,
+    parse_special_command,
+    register_special_command,
+    special_command,
+)
+
+__all__: list[str] = [
+    'CommandNotFound',
+    'FinishIteration',
+    'SpecialCommandAlias',
+    'clip_command',
+    'close_tee',
+    'copy_query_to_clipboard',
+    'disable_pager',
+    'disable_show_warnings',
+    'editor_command',
+    'enable_show_warnings',
+    'execute',
+    'flush_pipe_once_if_written',
+    'forced_horizontal',
+    'get_clip_query',
+    'get_current_delimiter',
+    'get_editor_query',
+    'get_filename',
+    'handle_llm',
+    'is_expanded_output',
+    'is_llm_command',
+    'is_pager_enabled',
+    'is_redirected',
+    'is_show_warnings_enabled',
+    'is_timing_enabled',
+    'list_databases',
+    'list_tables',
+    'open_external_editor',
+    'parse_special_command',
+    'register_special_command',
+    'set_delimiter',
+    'set_destructive_keywords',
+    'set_expanded_output',
+    'set_favorite_queries',
+    'set_forced_horizontal_output',
+    'set_pager',
+    'set_pager_enabled',
+    'set_redirect',
+    'set_show_warnings_enabled',
+    'set_timing_enabled',
+    'set_show_favorite_query',
+    'is_show_favorite_query',
+    'special_command',
+    'split_queries',
+    'sql_using_llm',
+    'status',
+    'unset_once_if_written',
+    'write_once',
+    'write_pipe_once',
+    'write_tee',
+]

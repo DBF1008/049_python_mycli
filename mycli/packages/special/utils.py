@@ -1,0 +1,145 @@
+import datetime
+import logging
+import os
+from typing import Any
+
+import click
+import pymysql
+from pymysql.cursors import Cursor
+
+logger = logging.getLogger(__name__)
+
+CACHED_SSL_VERSION: dict[tuple, str | None] = {}
+
+
+def handle_cd_command(command: list[str]) -> tuple[bool, str | None]:
+    """Handles a `cd` shell command by calling python's os.chdir."""
+    if not command[0].lower() == 'cd':
+        return False, 'Not a cd command.'
+    if len(command) != 2:
+        return False, 'Exactly one directory name must be provided.'
+    directory = command[1]
+    try:
+        os.chdir(directory)
+        click.echo(os.getcwd(), err=True)
+        return True, None
+    except OSError as e:
+        return False, e.strerror
+
+
+def format_uptime(uptime_in_seconds: str) -> str:
+    """Format number of seconds into human-readable string.
+
+    :param uptime_in_seconds: The server uptime in seconds.
+    :returns: A human-readable string representing the uptime.
+
+    >>> uptime = format_uptime('56892')
+    >>> print(uptime)
+    15 hours 48 min 12 sec
+    """
+
+    m, s = divmod(int(uptime_in_seconds), 60)
+    h, m = divmod(m, 60)
+    d, h = divmod(h, 24)
+
+    uptime_values: list[str] = []
+
+    for value, unit in ((d, "days"), (h, "hours"), (m, "min"), (s, "sec")):
+        if value == 0 and not uptime_values:
+            # Don't include a value/unit if the unit isn't applicable to
+            # the uptime. E.g. don't do 0 days 0 hours 1 min 30 sec.
+            continue
+        if value == 1 and unit.endswith("s"):
+            # Remove the "s" if the unit is singular.
+            unit = unit[:-1]
+        uptime_values.append(f'{value} {unit}')
+
+    uptime = " ".join(uptime_values)
+    return uptime
+
+
+def get_uptime(cur: Cursor) -> int:
+    query = 'SHOW STATUS LIKE "Uptime"'
+    logger.debug(query)
+
+    uptime = 0
+
+    try:
+        cur.execute(query)
+        if one := cur.fetchone():
+            uptime = int(one[1] or 0)
+    except pymysql.err.OperationalError:
+        pass
+
+    return uptime
+
+
+def get_warning_count(cur: Cursor) -> int:
+    query = 'SHOW COUNT(*) WARNINGS'
+    logger.debug(query)
+
+    warning_count = 0
+
+    try:
+        cur.execute(query)
+        if one := cur.fetchone():
+            warning_count = int(one[0] or 0)
+    except pymysql.err.OperationalError:
+        pass
+
+    return warning_count
+
+
+def get_ssl_version(cur: Cursor) -> str | None:
+    cache_key = (id(cur.connection), cur.connection.thread_id())
+
+    if cache_key in CACHED_SSL_VERSION:
+        return CACHED_SSL_VERSION[cache_key] or None
+
+    query = 'SHOW STATUS LIKE "Ssl_version"'
+    logger.debug(query)
+
+    ssl_version = None
+
+    try:
+        cur.execute(query)
+        if one := cur.fetchone():
+            CACHED_SSL_VERSION[cache_key] = one[1]
+            ssl_version = one[1] or None
+        else:
+            CACHED_SSL_VERSION[cache_key] = ''
+    except pymysql.err.OperationalError:
+        pass
+
+    return ssl_version
+
+
+def get_ssl_cipher(cur: Cursor) -> str | None:
+    query = 'SHOW STATUS LIKE "Ssl_cipher"'
+    logger.debug(query)
+
+    ssl_cipher = None
+
+    try:
+        cur.execute(query)
+        if one := cur.fetchone():
+            ssl_cipher = one[1] or None
+    except pymysql.err.OperationalError:
+        pass
+
+    return ssl_cipher
+
+
+def get_server_timezone(variables: dict[str, Any]) -> str:
+    try:
+        if variables['time_zone'] == 'SYSTEM':
+            server_tz = variables['system_time_zone']
+        else:
+            server_tz = variables['time_zone']
+        return server_tz
+    except KeyError:
+        return ''
+
+
+def get_local_timezone() -> str:
+    return datetime.datetime.now().astimezone().tzname() or ''

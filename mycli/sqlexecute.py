@@ -1,0 +1,694 @@
+from __future__ import annotations
+
+import datetime
+import enum
+import logging
+import re
+import ssl
+from typing import Any, Generator, Iterable
+
+from prompt_toolkit.formatted_text import FormattedText
+import pymysql
+from pymysql.connections import Connection
+from pymysql.constants import FIELD_TYPE
+from pymysql.converters import conversions, convert_date, convert_datetime, convert_time, decoders
+from pymysql.cursors import Cursor
+
+from mycli.constants import ER_MUST_CHANGE_PASSWORD
+from mycli.packages.special import iocommands
+from mycli.packages.special.main import CommandNotFound, execute
+from mycli.packages.sqlresult import SQLResult
+
+try:
+    import paramiko  # noqa: F401
+    import sshtunnel
+except ImportError:
+    pass
+
+_logger = logging.getLogger(__name__)
+
+FIELD_TYPES = decoders.copy()
+FIELD_TYPES.update({FIELD_TYPE.NULL: type(None)})
+
+
+ERROR_CODE_ACCESS_DENIED = 1045
+
+
+class ServerSpecies(enum.Enum):
+    MySQL = "MySQL"
+    MariaDB = "MariaDB"
+    Percona = "Percona"
+    TiDB = "TiDB"
+    Doris = "Doris"
+    Unknown = "Unknown"
+
+
+class ServerInfo:
+    def __init__(self, species: ServerSpecies | None, version_str: str) -> None:
+        self.species = species
+        self.version_str = version_str
+        self.version = self.calc_mysql_version_value(version_str)
+
+    @staticmethod
+    def calc_mysql_version_value(version_str: str) -> int:
+        if not version_str or not isinstance(version_str, str):
+            return 0
+        try:
+            major, minor, patch = version_str.split(".")
+        except ValueError:
+            return 0
+        else:
+            return int(major) * 10_000 + int(minor) * 100 + int(patch)
+
+    @classmethod
+    def from_version_string(cls, version_string: str) -> ServerInfo:
+        if not version_string:
+            return cls(ServerSpecies.MySQL, "")
+
+        re_species = (
+            (r"(?P<version>[0-9\.]+)-MariaDB", ServerSpecies.MariaDB),
+            (r"[0-9\.]*-TiDB-v(?P<version>[0-9\.]+)-?(?P<comment>[a-z0-9\-]*)", ServerSpecies.TiDB),
+            (r"(?P<version>[0-9\.]+)[a-z0-9]*-(?P<comment>[0-9]+$)", ServerSpecies.Percona),
+            # Also matches plain "X.Y.Z" with no suffix (e.g. Homebrew MySQL).
+            (r"(?P<version>[0-9]+\.[0-9]+\.[0-9]+)[a-z0-9]*(-(?P<comment>[A-Za-z0-9_]+))?", ServerSpecies.MySQL),
+        )
+        for regexp, species in re_species:
+            match = re.search(regexp, version_string)
+            if match is not None:
+                parsed_version = match.group("version")
+                detected_species = species
+                break
+        else:
+            detected_species = ServerSpecies.MySQL
+            parsed_version = ""
+
+        return cls(detected_species, parsed_version)
+
+    def __str__(self) -> str:
+        if self.species:
+            return f"{self.species.value} {self.version_str}"
+        else:
+            return self.version_str
+
+
+class SQLExecute:
+    databases_query = """SHOW DATABASES"""
+
+    tables_query = """SHOW TABLES"""
+
+    show_candidates_query = '''SELECT name from mysql.help_topic WHERE name like "SHOW %"'''
+
+    users_query = """SELECT CONCAT("'", user, "'@'",host,"'") FROM mysql.user"""
+
+    functions_query = '''SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES
+    WHERE ROUTINE_TYPE="FUNCTION" AND ROUTINE_SCHEMA = %s'''
+
+    procedures_query = '''SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES
+    WHERE ROUTINE_TYPE="PROCEDURE" AND ROUTINE_SCHEMA = %s'''
+
+    character_sets_query = '''SHOW CHARACTER SET'''
+
+    collations_query = '''SHOW COLLATION'''
+
+    table_columns_query = """select TABLE_NAME, COLUMN_NAME from information_schema.columns
+                                    where table_schema = %s
+                                    order by table_name,ordinal_position"""
+
+    enum_values_query = """select TABLE_NAME, COLUMN_NAME, COLUMN_TYPE from information_schema.columns
+                                    where table_schema = %s and data_type = 'enum'
+                                    order by table_name,ordinal_position"""
+
+    foreign_keys_query = """SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
+                                    FROM information_schema.KEY_COLUMN_USAGE
+                                    WHERE TABLE_SCHEMA = %s AND REFERENCED_TABLE_NAME IS NOT NULL"""
+
+    now_query = """SELECT NOW()"""
+
+    @staticmethod
+    def _parse_enum_values(column_type: str) -> list[str]:
+        if not column_type or not column_type.lower().startswith("enum("):
+            return []
+
+        values: list[str] = []
+        current: list[str] = []
+        in_quote = False
+        i = column_type.find("(") + 1
+
+        while i < len(column_type):
+            ch = column_type[i]
+
+            if not in_quote:
+                if ch == "'":
+                    in_quote = True
+                    current = []
+                elif ch == ")":
+                    break
+            else:
+                if ch == "\\" and i + 1 < len(column_type):
+                    current.append(column_type[i + 1])
+                    i += 1
+                elif ch == "'":
+                    if i + 1 < len(column_type) and column_type[i + 1] == "'":
+                        current.append("'")
+                        i += 1
+                    else:
+                        values.append("".join(current))
+                        in_quote = False
+                else:
+                    current.append(ch)
+            i += 1
+
+        return values
+
+    def __init__(
+        self,
+        database: str | None,
+        user: str | None,
+        password: str | None,
+        host: str | None,
+        port: int | None,
+        socket: str | None,
+        character_set: str | None,
+        local_infile: bool | None,
+        ssl: dict[str, Any] | None,
+        ssh_user: str | None,
+        ssh_host: str | None,
+        ssh_port: int | None,
+        ssh_password: str | None,
+        ssh_key_filename: str | None,
+        init_command: str | None = None,
+        unbuffered: bool | None = None,
+    ) -> None:
+        self.dbname = database
+        self.user = user
+        self.password = password
+        self.host = host
+        self.port = port
+        self.socket = socket
+        self.character_set = character_set
+        self.local_infile = local_infile
+        self.ssl = ssl
+        self.server_info: ServerInfo | None = None
+        self.connection_id: int | None = None
+        self.ssh_user = ssh_user
+        self.ssh_host = ssh_host
+        self.ssh_port = ssh_port
+        self.ssh_password = ssh_password
+        self.ssh_key_filename = ssh_key_filename
+        self.init_command = init_command
+        self.unbuffered = unbuffered
+        self.conn: Connection | None = None
+        self.connect()
+
+    def connect(
+        self,
+        database: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+        host: str | None = None,
+        port: int | None = None,
+        socket: str | None = None,
+        character_set: str | None = None,
+        local_infile: bool | None = None,
+        ssl: dict[str, Any] | None = None,
+        ssh_host: str | None = None,
+        ssh_port: int | None = None,
+        ssh_user: str | None = None,
+        ssh_password: str | None = None,
+        ssh_key_filename: str | None = None,
+        init_command: str | None = None,
+        unbuffered: bool | None = None,
+    ):
+        db = database if database is not None else self.dbname
+        user = user if user is not None else self.user
+        password = password if password is not None else self.password
+        host = host if host is not None else self.host
+        port = port if port is not None else self.port
+        socket = socket if socket is not None else self.socket
+        character_set = character_set if character_set is not None else self.character_set
+        local_infile = local_infile if local_infile is not None else self.local_infile
+        ssl = ssl if ssl is not None else self.ssl
+        ssh_user = ssh_user if ssh_user is not None else self.ssh_user
+        ssh_host = ssh_host if ssh_host is not None else self.ssh_host
+        ssh_port = ssh_port if ssh_port is not None else self.ssh_port
+        ssh_password = ssh_password if ssh_password is not None else self.ssh_password
+        ssh_key_filename = ssh_key_filename if ssh_key_filename is not None else self.ssh_key_filename
+        init_command = init_command if init_command is not None else self.init_command
+        unbuffered = unbuffered if unbuffered is not None else self.unbuffered
+        _logger.debug(
+            "Connection DB Params: \n"
+            "\tdatabase: %r"
+            "\tuser: %r"
+            "\thost: %r"
+            "\tport: %r"
+            "\tsocket: %r"
+            "\tcharacter_set: %r"
+            "\tlocal_infile: %r"
+            "\tssl: %r"
+            "\tssh_user: %r"
+            "\tssh_host: %r"
+            "\tssh_port: %r"
+            "\tssh_password: ***"
+            "\tssh_key_filename: %r"
+            "\tinit_command: %r"
+            "\tunbuffered: %r",
+            db,
+            user,
+            host,
+            port,
+            socket,
+            character_set,
+            local_infile,
+            ssl,
+            ssh_user,
+            ssh_host,
+            ssh_port,
+            ssh_key_filename,
+            init_command,
+            unbuffered,
+        )
+        conv = conversions.copy()
+        conv.update({
+            FIELD_TYPE.TIMESTAMP: lambda obj: convert_datetime(obj) or obj,
+            FIELD_TYPE.DATETIME: lambda obj: convert_datetime(obj) or obj,
+            FIELD_TYPE.TIME: lambda obj: convert_time(obj) or obj,
+            FIELD_TYPE.DATE: lambda obj: convert_date(obj) or obj,
+        })
+
+        defer_connect = False
+
+        if ssh_host:
+            defer_connect = True
+
+        client_flag = pymysql.constants.CLIENT.INTERACTIVE
+        if init_command and len(list(iocommands.split_queries(init_command))) > 1:
+            client_flag |= pymysql.constants.CLIENT.MULTI_STATEMENTS
+        client_flag |= pymysql.constants.CLIENT.HANDLE_EXPIRED_PASSWORDS
+
+        ssl_context = None
+        if ssl:
+            ssl_context = self._create_ssl_ctx(ssl)
+
+        connect_kwargs: dict[str, Any] = {
+            "database": db,
+            "user": user,
+            "password": password or '',
+            "host": host,
+            "port": port or 0,
+            "unix_socket": socket,
+            "use_unicode": True,
+            "charset": character_set or '',
+            "autocommit": True,
+            "client_flag": client_flag,
+            "local_infile": local_infile or False,
+            "conv": conv,
+            "ssl": ssl_context,  # type: ignore[arg-type]
+            "program_name": "mycli",
+            "defer_connect": defer_connect,
+            "init_command": init_command or None,
+            "cursorclass": pymysql.cursors.SSCursor if unbuffered else pymysql.cursors.Cursor,
+        }
+
+        self.sandbox_mode = False
+        try:
+            conn = pymysql.connect(**connect_kwargs)  # type: ignore[misc]
+        except pymysql.OperationalError as e:
+            if e.args[0] == ER_MUST_CHANGE_PASSWORD:
+                # Post-handshake queries (SET NAMES, SET AUTOCOMMIT, init_command)
+                # fail with ER_MUST_CHANGE_PASSWORD in sandbox mode.
+                # Reconnect with only the raw handshake.
+                connect_kwargs['defer_connect'] = True
+                connect_kwargs['autocommit'] = None
+                connect_kwargs['init_command'] = None
+                conn = pymysql.connect(**connect_kwargs)  # type: ignore[misc]
+                self._connect_sandbox(conn)
+                self.sandbox_mode = True
+            else:
+                raise
+
+        if ssh_host and not self.sandbox_mode:
+            ##### paramiko.Channel is a bad socket implementation overall if you want SSL through an SSH tunnel
+            #####
+            # instead let's open a tunnel and rewrite host:port to local bind
+            try:
+                chan = sshtunnel.SSHTunnelForwarder(
+                    (ssh_host, ssh_port),
+                    ssh_username=ssh_user,
+                    ssh_pkey=ssh_key_filename,
+                    ssh_password=ssh_password,
+                    remote_bind_address=(host, port),
+                )
+                chan.start()
+
+                conn.host = chan.local_bind_host
+                conn.port = chan.local_bind_port
+                conn.connect()
+            except Exception as e:
+                raise e
+
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except pymysql.err.Error:
+                pass
+        self.conn = conn
+        # Update them after the connection is made to ensure that it was a
+        # successful connection.
+        self.dbname = db
+        self.user = user
+        self.password = password
+        self.host = host
+        self.port = port
+        self.socket = socket
+        self.character_set = character_set
+        self.ssl = ssl
+        self.init_command = init_command
+        self.unbuffered = unbuffered
+        # retrieve connection id (skip in sandbox mode as queries will fail)
+        if not self.sandbox_mode:
+            self.reset_connection_id()
+            server_info = ServerInfo.from_version_string(conn.server_version)  # type: ignore[attr-defined]
+            if server_info.species == ServerSpecies.MySQL:
+                if (doris_version := self._probe_doris_version()) is not None:
+                    server_info = ServerInfo(ServerSpecies.Doris, doris_version)
+            self.server_info = server_info
+
+    def _probe_doris_version(self) -> str | None:
+        """Query the server to check if it is Doris. Returns the Doris version string
+        (e.g. '2.1.7') if confirmed, or None if the server is not Doris."""
+        if self.sandbox_mode or self.conn is None:
+            return None
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute("SELECT @@version_comment, @@version")
+                row = cur.fetchone()
+            if not row:
+                return None
+            version_comment = str(row[0] or "")
+            version = str(row[1] or "")
+            if "doris" not in version_comment.lower() and "doris" not in version.lower():
+                return None
+            # Prefer @@version_comment which usually carries the real Doris version string
+            # (e.g. "doris-2.1.7-rc01"), then fall back to @@version.
+            for candidate in (version_comment, version):
+                ver_match = re.search(r"([0-9]+\.[0-9]+\.[0-9]+)", candidate)
+                if ver_match:
+                    return ver_match.group(1)
+            # Doris confirmed but couldn't parse a version number
+            return ""
+        except Exception as e:
+            _logger.debug("Doris detection failed: %s", e)
+        return None
+
+    def run(self, statement: str) -> Generator[SQLResult, None, None]:
+        """Execute the sql in the database and return the results."""
+
+        # Remove spaces and EOL
+        statement = statement.strip()
+        if not statement:  # Empty string
+            yield SQLResult()
+
+        # Split the sql into separate queries and run each one.
+        # Unless it's saving a favorite query, in which case we
+        # want to save them all together.
+        if statement.startswith("\\fs"):
+            components: Iterable[str] = [statement]
+        else:
+            components = iocommands.split_queries(statement)
+
+        for sql in components:
+            # \G is treated specially since we have to set the expanded output.
+            if sql.endswith("\\G"):
+                iocommands.set_expanded_output(True)
+                sql = sql[:-2].strip()
+            # \g is treated specially since we might want collapsed output when
+            # auto vertical output is enabled
+            elif sql.endswith('\\g'):
+                iocommands.set_expanded_output(False)
+                iocommands.set_forced_horizontal_output(True)
+                sql = sql[:-2].strip()
+
+            assert isinstance(self.conn, Connection)
+            cur = self.conn.cursor()
+            try:  # Special command
+                _logger.debug("Trying a dbspecial command. sql: %r", sql)
+                yield from execute(cur, sql)
+            except CommandNotFound:  # Regular SQL
+                _logger.debug("Regular sql statement. sql: %r", sql)
+                cur.execute(sql)
+                while True:
+                    yield self.get_result(cur)
+
+                    # PyMySQL returns an extra, empty result set with stored
+                    # procedures. We skip it (rowcount is zero and no
+                    # description).
+                    if not cur.nextset() or (not cur.rowcount and cur.description is None):
+                        break
+
+    def get_result(self, cursor: Cursor) -> SQLResult:
+        """Get the current result's data from the cursor."""
+        preamble = header = None
+
+        # cursor.description is not None for queries that return result sets,
+        # e.g. SELECT or SHOW.
+        plural = '' if cursor.rowcount == 1 else 's'
+        if cursor.description:
+            header = [x[0] for x in cursor.description]
+            status = FormattedText([('', f'{cursor.rowcount} row{plural} in set')])
+        else:
+            _logger.debug("No rows in result.")
+            status = FormattedText([('', f'Query OK, {cursor.rowcount} row{plural} affected')])
+
+        if cursor.warning_count > 0:
+            plural = '' if cursor.warning_count == 1 else 's'
+            comma = FormattedText([('', ', ')])
+            warning_count = FormattedText([('class:output.status.warning-count', f'{cursor.warning_count} warning{plural}')])
+            status.extend(comma)
+            status.extend(warning_count)
+
+        return SQLResult(preamble=preamble, header=header, rows=cursor, status=status)
+
+    def tables(self) -> Generator[tuple[str], None, None]:
+        """Yields table names"""
+
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Tables Query. sql: %r", self.tables_query)
+            cur.execute(self.tables_query)
+            yield from cur
+
+    def table_columns(self, schema: str | None = None) -> Generator[tuple[str, str], None, None]:
+        """Yields (table name, column name) pairs for *schema* (default: current database)."""
+        target = schema if schema is not None else self.dbname
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Columns Query. sql: %r schema: %r", self.table_columns_query, target)
+            cur.execute(self.table_columns_query, (target,))
+            yield from cur
+
+    def enum_values(self, schema: str | None = None) -> Generator[tuple[str, str, list[str]], None, None]:
+        """Yields (table name, column name, enum values) tuples for *schema*."""
+        target = schema if schema is not None else self.dbname
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Enum Values Query. sql: %r schema: %r", self.enum_values_query, target)
+            cur.execute(self.enum_values_query, (target,))
+            for table_name, column_name, column_type in cur:
+                values = self._parse_enum_values(column_type)
+                if values:
+                    yield (table_name, column_name, values)
+
+    def foreign_keys(self, schema: str | None = None) -> Generator[tuple[str, str, str, str], None, None]:
+        """Yields (table_name, column_name, referenced_table_name, referenced_column_name) tuples for *schema*."""
+        target = schema if schema is not None else self.dbname
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Foreign Keys Query. sql: %r schema: %r", self.foreign_keys_query, target)
+            try:
+                cur.execute(self.foreign_keys_query, (target,))
+                yield from cur
+            except Exception as e:
+                _logger.error('No foreign key completions due to %r', e)
+
+    def databases(self) -> list[str]:
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Databases Query. sql: %r", self.databases_query)
+            cur.execute(self.databases_query)
+            return [x[0] for x in cur.fetchall()]
+
+    def functions(self, schema: str | None = None) -> Generator[tuple[str, str], None, None]:
+        """Yields tuples of (schema_name, function_name) for *schema*."""
+
+        target = schema if schema is not None else self.dbname
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Functions Query. sql: %r schema: %r", self.functions_query, target)
+            cur.execute(self.functions_query, (target,))
+            yield from cur
+
+    def procedures(self, schema: str | None = None) -> Generator[tuple, None, None]:
+        """Yields tuples of (procedure_name, ) for *schema*."""
+
+        target = schema if schema is not None else self.dbname
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Procedures Query. sql: %r schema: %r", self.procedures_query, target)
+            try:
+                cur.execute(self.procedures_query, (target,))
+            except pymysql.DatabaseError as e:
+                _logger.error('No procedure completions due to %r', e)
+                yield ()
+            else:
+                yield from cur
+
+    def character_sets(self) -> Generator[tuple, None, None]:
+        """Yields tuples of (character_set_name, )"""
+
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Character sets Query. sql: %r", self.character_sets_query)
+            try:
+                cur.execute(self.character_sets_query)
+            except pymysql.DatabaseError as e:
+                _logger.error('No character_set completions due to %r', e)
+                yield ()
+            else:
+                yield from cur
+
+    def collations(self) -> Generator[tuple, None, None]:
+        """Yields tuples of (collation_name, )"""
+
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Collations Query. sql: %r", self.collations_query)
+            try:
+                cur.execute(self.collations_query)
+            except pymysql.DatabaseError as e:
+                _logger.error('No collations completions due to %r', e)
+                yield ()
+            else:
+                yield from cur
+
+    def show_candidates(self) -> Generator[tuple, None, None]:
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Show Query. sql: %r", self.show_candidates_query)
+            try:
+                cur.execute(self.show_candidates_query)
+            except pymysql.DatabaseError as e:
+                _logger.error("No show completions due to %r", e)
+                yield ()
+            else:
+                for row in cur:
+                    yield (row[0].split(None, 1)[-1],)
+
+    def users(self) -> Generator[tuple, None, None]:
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Users Query. sql: %r", self.users_query)
+            try:
+                cur.execute(self.users_query)
+            except pymysql.DatabaseError as e:
+                _logger.error("No user completions due to %r", e)
+                yield ()
+            else:
+                yield from cur
+
+    def now(self) -> datetime.datetime:
+        assert isinstance(self.conn, Connection)
+        with self.conn.cursor() as cur:
+            _logger.debug("Now Query. sql: %r", self.now_query)
+            cur.execute(self.now_query)
+            if one := cur.fetchone():
+                return one[0]
+            else:
+                return datetime.datetime.now()
+
+    def get_connection_id(self) -> int | None:
+        if not self.connection_id:
+            self.reset_connection_id()
+        return self.connection_id
+
+    def reset_connection_id(self) -> None:
+        # Remember current connection id
+        _logger.debug("Get current connection id")
+        try:
+            results = self.run("select connection_id()")
+            for result in results:
+                cur = result.rows
+                if isinstance(cur, Cursor):
+                    v = cur.fetchone()
+                    self.connection_id = v[0] if v is not None else -1
+                else:
+                    raise ValueError
+        except Exception as e:
+            # See #1054
+            self.connection_id = -1
+            _logger.error("Failed to get connection id: %s", e)
+        else:
+            _logger.debug("Current connection id: %s", self.connection_id)
+
+    def change_db(self, db: str) -> None:
+        assert isinstance(self.conn, Connection)
+        self.conn.select_db(db)
+        self.dbname = db
+
+    @staticmethod
+    def _connect_sandbox(conn: Connection) -> None:
+        """Connect in sandbox mode, performing only the handshake.
+
+        pymysql's normal connect() runs post-handshake queries (SET NAMES,
+        SET AUTOCOMMIT, init_command) that all fail with ER_MUST_CHANGE_PASSWORD
+        in sandbox mode.  This method performs the raw socket connection and
+        authentication handshake only.
+        """
+        # Reuse pymysql internals for the handshake + auth, but
+        # temporarily stub out set_character_set so it becomes a no-op.
+        original_set_charset = conn.set_character_set
+        conn.set_character_set = lambda *_args, **_kwargs: None  # type: ignore[assignment]
+        try:
+            conn.connect()
+        finally:
+            conn.set_character_set = original_set_charset  # type: ignore[assignment]
+
+    def _create_ssl_ctx(self, sslp: dict) -> ssl.SSLContext:
+        ca = sslp.get("ca")
+        capath = sslp.get("capath")
+        hasnoca = ca is None and capath is None
+        ctx = ssl.create_default_context(cafile=ca, capath=capath)
+        ctx.check_hostname = not hasnoca and sslp.get("check_hostname", True)
+        ctx.verify_mode = ssl.CERT_NONE if hasnoca else ssl.CERT_REQUIRED
+        if "cert" in sslp:
+            ctx.load_cert_chain(sslp["cert"], keyfile=sslp.get("key"))
+        if "cipher" in sslp:
+            ctx.set_ciphers(sslp["cipher"])
+
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+
+        if "tls_version" in sslp:
+            tls_version = sslp["tls_version"]
+
+            if tls_version == "TLSv1":
+                ctx.minimum_version = ssl.TLSVersion.TLSv1
+                ctx.maximum_version = ssl.TLSVersion.TLSv1
+            elif tls_version == "TLSv1.1":
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_1
+                ctx.maximum_version = ssl.TLSVersion.TLSv1_1
+            elif tls_version == "TLSv1.2":
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+            elif tls_version == "TLSv1.3":
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+                ctx.maximum_version = ssl.TLSVersion.TLSv1_3
+            else:
+                _logger.error("Invalid tls version: %s", tls_version)
+
+        return ctx
+
+    def close(self) -> None:
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except pymysql.err.Error:
+                pass

@@ -1,0 +1,291 @@
+###
+### CLI arguments
+###
+
+check your ~/.myclirc settings using the --checkup flag!
+
+list your aliased DSNs with the --list-dsn flag!
+
+log every query and result with the --logfile option!
+
+the --checkpoint option helps track successful queries in batch mode!
+
+the --format option helps set the output format in batch mode!
+
+the --throttle option helps slow down queries in batch mode!
+
+the --password-file option can be used with a FIFO to avoid saving creds to a file!
+
+the --character-set option sets the character set for a single session!
+
+the --unbuffered flag can save memory when in batch mode!
+
+--use-keyring=true lets you access the system keyring for passwords!
+
+--use-keyring=reset resets a password saved to the system keyring!
+
+the --myclirc option can change the config file location for a single session!
+
+the --execute option lets you execute a single line of SQL!
+
+the --auto-vertical-output flag lets you automatically switch to vertical output!
+
+the --show-warnings flag turns on warnings from the MySQL server!
+
+the --no-warn flag turns off warnings before running a destructive query!
+
+the --init-command option lets you execute initialization SQL before a session!
+
+the --login-path option lets you work with login-path files!
+
+--keepalive-ticks=<num> sets keepalive pings for a single session!
+
+###
+### commands
+###
+
+interact with an LLM using the \llm command!
+
+copy a query to the clipboard using \clip at the end of the query!
+
+\dt lists tables; \dt <table> describes <table>!
+
+edit a query in an external editor using <query>\edit!
+
+edit a query in an external editor using \edit <filename>!
+
+\f lists favorite queries; \f <name> executes a favorite!
+
+\fs <name> <query> saves a favorite query!
+
+\fd <name> deletes a saved favorite query!
+
+\l lists databases!
+
+\once <filename> appends the next result to <filename>!
+
+\| <command> sends the next result to a subprocess!
+
+\t toggles timing of commands!
+
+\r or "connect" reconnects to the server!
+
+\delimiter changes the SQL delimiter!
+
+\q, "quit", or "exit" exits from the prompt!
+
+\? or "help" for help!
+
+"help <keyword>" for help on SQL keywords!
+
+\n or "nopager" to disable the pager!
+
+use "tee"/"notee" to write/stop-writing results to a output file!
+
+\W or "warnings" enables automatic warnings display!
+
+\w or "nowarnings" disables automatic warnings display!
+
+\P or "pager" sets the pager.  Try "pager less"!
+
+\R or "prompt" changes the prompt format!
+
+\Tr or "redirectformat" changes the table format for redirects!
+
+\# or "rehash" refreshes autocompletions!
+
+\. or "source" executes queries from a file!
+
+\s or "status" requests status information from the server!
+
+use "system <command>" to execute a shell command!
+
+\T or "tableformat" changes the interactive table format!
+
+\u or "use" changes to a new database!
+
+the "watch" command executes a query every N seconds!
+
+use \bug to file a bug on GitHub!
+
+###
+### environment variables
+###
+
+run "export VISUAL='code --wait'" in your shell to \edit queries using VS Code!
+
+set environment variable MYCLI_LLM_OFF to skip loading LLM libraries!
+
+set environment variable MYCLI_HISTFILE to relocate the history file!
+
+set environment variable MYSQL_PWD to set a default password!
+
+set environment variable MYSQL_HOST to set a default host!
+
+set environment variable MYSQL_TCP_PORT to set a default port!
+
+set environment variable MYSQL_USER to set a default username!
+
+set environment variable MYSQL_UNIX_SOCKET to set a default socket!
+
+set environment variable MYSQL_DSN to set a default DSN!
+
+###
+### general
+###
+
+display query output vertically using \G at the end of a query!
+
+run SQL scripts in batch mode using the standard input!
+
+###
+### keystrokes
+###
+
+edit a query in an external editor using keystrokes control-x + control-e!
+
+open a documentation browser using keystroke F1!
+
+toggle smart completion using keystroke F2!
+
+toggle multi-line mode using keystroke F3!
+
+toggle vi mode using keystroke F4!
+
+complete at cursor using the tab key!
+
+summon completion candidates using control-space!
+
+control-space works well with "min_completion_trigger" in ~/.myclirc!
+
+prettify a query using keystrokes control-x + p!
+
+un-prettify a query using keystrokes control-x + u!
+
+insert the current date using keystrokes control-o + d!
+
+insert the quoted current date using keystrokes control-o + control-d!
+
+insert the current datetime using keystrokes control-o + t!
+
+insert the quoted current date using keystrokes control-o + control-t!
+
+search query history using keystroke control-r!
+
+use keystroke control-g to cancel completion popups!
+
+use keystroke right-arrow to accept a full-line suggestion from your history!
+
+cancel history search using keystrokes Escape or control-g!
+
+uppercase a word using keystroke alt-u!
+
+lowercase a word using keystroke alt-l!
+
+collapse multiple spaces using keystroke alt-\!
+
+undo using keystroke control-_ or control-x + control-u!
+
+ditto the last argument of the previous command with keystroke alt-.!
+
+ditto the last argument of the previous command with keystroke alt-_!
+
+turn the current query into a comment with keystroke alt-#!
+
+jump forward to a character with keystroke control-]!
+
+jump backward to a character with keystroke alt-control-]!
+
+insert all completions with keystroke alt-*!
+
+in multi-line mode, keystroke alt-Enter dispatches the query!
+
+keystroke control-q + control-j inserts a newline without dispatching the query!
+
+###
+### myclirc options
+###
+
+set "less_chatty = True" in ~/.myclirc to turn off these tips!
+
+set a fancy table format like "table_format = psql_unicode" in ~/.myclirc!
+
+change the string for NULLs with "null_string = <null>" in ~/.myclirc!
+
+choose a color theme with "syntax_style" in ~/.myclirc!
+
+design a prompt with the "prompt" option in ~/.myclirc!
+
+turn off multi-line prompt indentation with "prompt_continuation = ''" in ~/.myclirc!
+
+save passwords in the system keyring with "use_keyring" in ~/.myclirc!
+
+enable SHOW WARNINGS with "show warnings" in ~/.myclirc!
+
+turn off smart completions with "smart_completion" in ~/.myclirc!
+
+turn on multi-line mode with "multi_line" in ~/.myclirc!
+
+turn off destructive warnings with "destructive_warning" in ~/.myclirc!
+
+control destructive warnings with "destructive_keywords" in ~/.myclirc!
+
+move the history file locattion with "history_file" in ~/.myclirc!
+
+enable an audit log with "audit_log" in ~/.myclirc!
+
+disable timing of SQL statements with "timiing" in ~/.myclirc!
+
+disable display of SQL when running a favorite with "show_favorite_query" in ~/.myclirc!
+
+notify after a long query by setting "beep_after_seconds" in ~/.myclirc!
+
+control alignment with "numeric_alignment" in ~/.myclirc!
+
+control binary value display with "binary_display" in ~/.myclirc!
+
+set vi key bindings with "key_bindings" in ~/.myclirc!
+
+show more suggestions with "wider_completion_menu" in ~/.myclirc!
+
+use the host alias in the prompt with "login_path_as_host" in ~/.myclirc!
+
+auto-display wide results vertically with "auto_vertical_output" in ~/.myclirc!
+
+control keyword casing in completions using "keyword_casing" in ~/.myclirc!
+
+disable pager on startup using "enable_pager" in ~/.myclirc!
+
+choose a pager command with "pager" in ~/.myclirc!
+
+customize colors using the "[colors]" section in ~/.myclirc!
+
+customize LLM commands using the "[llm]" section in ~/.myclirc!
+
+customize history search using "control_r" in ~/.myclirc!
+
+edit favorite queries directly using the "[favorite_queries]" section in ~/.myclirc!
+
+set up initial commands using the "[init-commands]" section in ~/.myclirc!
+
+create DSN shortcuts using the "[alias_dsn]" section in ~/.myclirc!
+
+set up per-DSN initial commands using the "[alias_dsn.init-commands]" section in ~/.myclirc!
+
+set up connection defaults using the "[connection]" section in ~/.myclirc!
+
+use "min_completion_trigger" in ~/.myclirc to defer completions!
+
+colorize search previews with "highlight_preview" in ~/.myclirc!
+
+###
+### redirection
+###
+
+redirect query output to a shell command with "$| <command>"!
+
+redirect query output to a file with "$> <filename>"!
+
+append query output to a file with "$>> <filename>"!
+
+run a command after shell redirects with "post_redirect_command" in ~/.myclirc!

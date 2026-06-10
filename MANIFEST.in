@@ -1,0 +1,5 @@
+include LICENSE.txt *.md *.rst doc/screenshots/*
+recursive-include test *.cnf
+recursive-include test *.feature
+recursive-include test *.py
+recursive-include test *.txt

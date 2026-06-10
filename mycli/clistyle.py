@@ -1,0 +1,210 @@
+import logging
+from typing import cast
+
+from prompt_toolkit.styles import Style, merge_styles
+from prompt_toolkit.styles.pygments import style_from_pygments_cls
+from prompt_toolkit.styles.style import _MergedStyle
+from pygments.style import Style as PygmentsStyle
+import pygments.styles
+from pygments.token import Token, string_to_tokentype
+from pygments.util import ClassNotFound
+
+logger = logging.getLogger(__name__)
+
+# map Pygments tokens (ptk 1.0) to class names (ptk 2.0).
+TOKEN_TO_PROMPT_STYLE: dict[Token, str] = {
+    Token.Menu.Completions.Completion.Current: "completion-menu.completion.current",
+    Token.Menu.Completions.Completion: "completion-menu.completion",
+    Token.Menu.Completions.Meta.Current: "completion-menu.meta.completion.current",
+    Token.Menu.Completions.Meta: "completion-menu.meta.completion",
+    Token.Menu.Completions.MultiColumnMeta: "completion-menu.multi-column-meta",
+    Token.Menu.Completions.ProgressButton: "scrollbar.arrow",  # best guess
+    Token.Menu.Completions.ProgressBar: "scrollbar",  # best guess
+    Token.SelectedText: "selected",
+    Token.SearchMatch: "search",
+    Token.SearchMatch.Current: "search.current",
+    Token.MatchingBracket.Cursor: "matching-bracket.cursor",
+    Token.MatchingBracket.Other: "matching-bracket.other",
+    Token.Toolbar: "bottom-toolbar",
+    Token.Toolbar.Off: "bottom-toolbar.off",
+    Token.Toolbar.On: "bottom-toolbar.on",
+    Token.Toolbar.Search: "search-toolbar",
+    Token.Toolbar.Search.Text: "search-toolbar.text",
+    Token.Toolbar.System: "system-toolbar",
+    Token.Toolbar.Arg: "arg-toolbar",
+    Token.Toolbar.Arg.Text: "arg-toolbar.text",
+    Token.Toolbar.Transaction.Valid: "bottom-toolbar.transaction.valid",
+    Token.Toolbar.Transaction.Failed: "bottom-toolbar.transaction.failed",
+    Token.Output.TableSeparator: "output.table-separator",
+    Token.Output.Header: "output.header",
+    Token.Output.OddRow: "output.odd-row",
+    Token.Output.EvenRow: "output.even-row",
+    Token.Output.Null: "output.null",
+    Token.Output.Status: "output.status",
+    Token.Output.Status.WarningCount: "output.status.warning-count",
+    Token.Output.Timing: "output.timing",
+    Token.Warnings.TableSeparator: "warnings.table-separator",
+    Token.Warnings.Header: "warnings.header",
+    Token.Warnings.OddRow: "warnings.odd-row",
+    Token.Warnings.EvenRow: "warnings.even-row",
+    Token.Warnings.Null: "warnings.null",
+    Token.Warnings.Status: "warnings.status",
+    Token.Warnings.Status.WarningCount: "warnings.status.warning-count",
+    Token.Warnings.Timing: "warnings.timing",
+    Token.Prompt: "prompt",
+    Token.Continuation: "continuation",
+}
+
+# reverse dict for cli_helpers, because they still expect Pygments tokens.
+PROMPT_STYLE_TO_TOKEN: dict[str, Token] = {v: k for k, v in TOKEN_TO_PROMPT_STYLE.items()}
+
+# all tokens that the Pygments MySQL lexer can produce
+OVERRIDE_STYLE_TO_TOKEN: dict[str, Token] = {
+    "sql.comment": Token.Comment,
+    "sql.comment.multi-line": Token.Comment.Multiline,
+    "sql.comment.single-line": Token.Comment.Single,
+    "sql.comment.optimizer-hint": Token.Comment.Special,
+    "sql.escape": Token.Error,
+    "sql.keyword": Token.Keyword,
+    "sql.datatype": Token.Keyword.Type,
+    "sql.literal": Token.Literal,
+    "sql.literal.date": Token.Literal.Date,
+    "sql.symbol": Token.Name,
+    "sql.quoted-schema-object": Token.Name.Quoted,
+    "sql.quoted-schema-object.escape": Token.Name.Quoted.Escape,
+    "sql.constant": Token.Name.Constant,
+    "sql.function": Token.Name.Function,
+    "sql.variable": Token.Name.Variable,
+    "sql.number": Token.Number,
+    "sql.number.binary": Token.Number.Bin,
+    "sql.number.float": Token.Number.Float,
+    "sql.number.hex": Token.Number.Hex,
+    "sql.number.integer": Token.Number.Integer,
+    "sql.operator": Token.Operator,
+    "sql.punctuation": Token.Punctuation,
+    "sql.string": Token.String,
+    "sql.string.double-quouted": Token.String.Double,
+    "sql.string.escape": Token.String.Escape,
+    "sql.string.single-quoted": Token.String.Single,
+    "sql.whitespace": Token.Text,
+}
+
+
+def parse_pygments_style(
+    token_name: str,
+    style_object: type[PygmentsStyle] | PygmentsStyle | dict[object, str] | str,
+    style_dict: dict[str, str],
+) -> tuple[Token, str]:
+    """Parse token type and style string.
+
+    :param token_name: str name of Pygments token. Example: "Token.String"
+    :param style_object: pygments.style.Style instance to use as base
+    :param style_dict: dict of token names and their styles, customized to this cli
+
+    """
+    token_type = string_to_tokentype(token_name)
+    if isinstance(style_object, type) and issubclass(style_object, PygmentsStyle):
+        # When a Pygments Style class is passed, use its "styles" mapping.
+        other_token_type = string_to_tokentype(style_dict[token_name])
+        style_class = cast(type[PygmentsStyle], style_object)
+        return token_type, style_class.styles[other_token_type]
+    elif isinstance(style_object, PygmentsStyle):
+        other_token_type = string_to_tokentype(style_dict[token_name])
+        return token_type, style_object.styles[other_token_type]
+    else:
+        return token_type, style_dict[token_name]
+
+
+def is_valid_pygments(name: str) -> bool:
+    try:
+
+        class TestStyle(PygmentsStyle):
+            default_style = ''
+            styles = {Token.Default: name}
+
+        return True
+    except AssertionError:
+        # can't emit error because some styles are valid pygments and not valid ptoolkit
+        return False
+
+
+def is_valid_ptoolkit(name: str) -> bool:
+    try:
+        _s = Style([("default", name)])
+        return True
+    except ValueError:
+        # can't emit error because some styles are valid pygments and not valid ptoolkit
+        return False
+
+
+def style_factory_ptoolkit(name: str, cli_style: dict[str, str]) -> _MergedStyle:
+    try:
+        style: PygmentsStyle = pygments.styles.get_style_by_name(name)
+    except ClassNotFound:
+        style = pygments.styles.get_style_by_name("native")
+
+    prompt_styles: list[tuple[str, str]] = []
+    # prompt-toolkit used pygments tokens for styling before, switched to style
+    # names in 2.0. Convert old token types to new style names, for backwards compatibility.
+    for token in cli_style:
+        if token.startswith("Token."):
+            # treat as pygments token (1.0)
+            token_type, style_value = parse_pygments_style(token, style, cli_style)
+            if token_type in TOKEN_TO_PROMPT_STYLE:
+                prompt_style = TOKEN_TO_PROMPT_STYLE[token_type]
+                if is_valid_ptoolkit(style_value):
+                    prompt_styles.append((prompt_style, style_value))
+            else:
+                # we don't want to support tokens anymore
+                logger.error("Unhandled style / class name: %s", token)
+        else:
+            # treat as prompt style name (2.0). See default style names here:
+            # https://github.com/jonathanslenders/python-prompt-toolkit/blob/master/prompt_toolkit/styles/defaults.py
+            if is_valid_ptoolkit(cli_style[token]):
+                prompt_styles.append((token, cli_style[token]))
+
+    override_style: Style = Style([("bottom-toolbar", "noreverse")])
+    return merge_styles([style_from_pygments_cls(style), override_style, Style(prompt_styles)])
+
+
+def style_factory_helpers(
+    name: str,
+    cli_style: dict[str, str],
+    warnings: bool = False,
+) -> PygmentsStyle:
+    try:
+        style: dict[PygmentsStyle | str, str] = pygments.styles.get_style_by_name(name).styles
+    except ClassNotFound:
+        style = pygments.styles.get_style_by_name("native").styles
+
+    for token in cli_style:
+        if token.startswith("Token."):
+            token_type, style_value = parse_pygments_style(token, style, cli_style)
+            if is_valid_pygments(style_value):
+                style.update({token_type: style_value})
+        elif token in PROMPT_STYLE_TO_TOKEN:
+            token_type = PROMPT_STYLE_TO_TOKEN[token]
+            if is_valid_pygments(cli_style[token]):
+                style.update({token_type: cli_style[token]})
+        elif token in OVERRIDE_STYLE_TO_TOKEN:
+            token_type = OVERRIDE_STYLE_TO_TOKEN[token]
+            if is_valid_pygments(cli_style[token]):
+                style.update({token_type: cli_style[token]})
+        else:
+            # TODO: cli helpers will have to switch to ptk.Style
+            logger.error("Unhandled style / class name: %s", token)
+
+    if warnings:
+        for warning_token in list(style.keys()):
+            if 'Warnings' not in str(warning_token):
+                continue
+            warning_str = str(warning_token)
+            output_str = warning_str.replace('Warnings', 'Output')
+            output_token = string_to_tokentype(output_str)
+            style[output_token] = style[warning_token]
+
+    class OutputStyle(PygmentsStyle):
+        default_style = ""
+        styles = style
+
+    return OutputStyle
