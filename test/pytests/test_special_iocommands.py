@@ -17,6 +17,7 @@ import pytest
 
 import mycli.packages.special
 from mycli.packages.special import iocommands
+from mycli.packages.special.main import CommandNotFound
 from mycli.packages.sqlresult import SQLResult
 from test.utils import TEMPFILE_PREFIX, db_connection, dbtest, send_ctrl_c
 
@@ -614,8 +615,13 @@ def test_execute_favorite_query_list_missing_and_bad_args(monkeypatch) -> None:
 def test_execute_favorite_query_special_and_plain_sql(monkeypatch) -> None:
     favorite_queries = FakeFavoriteQueries({'combo': 'help demo; select 1'})
     monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
-    monkeypatch.setattr(iocommands, 'SPECIAL_COMMANDS', {'help': object()})
-    monkeypatch.setattr(iocommands, 'special_execute', lambda cur, sql: [SQLResult(status=f'ran {sql}')])
+
+    def fake_special_execute(cur, sql):
+        if sql.startswith('help'):
+            return [SQLResult(status=f'ran {sql}')]
+        raise CommandNotFound(sql)
+
+    monkeypatch.setattr(iocommands, 'special_execute', fake_special_execute)
 
     cursor = FakeCursor({'select 1': None})
     results = list(iocommands.execute_favorite_query(cursor, 'combo'))
@@ -931,3 +937,70 @@ def test_watch_query_confirmed_without_description_and_keyboard_interrupt(monkey
 
     assert secho_calls == ['Your call!', '']
     assert iocommands.is_pager_enabled() is True
+
+
+def test_subst_favorite_query_args_no_cascade() -> None:
+    """Arg values containing $N placeholders must not be substituted again."""
+    assert iocommands.subst_favorite_query_args('select $1, $2', ['$2', 'hello']) == ['select $2, hello', None]
+    assert iocommands.subst_favorite_query_args('select $1, $2', ['$$', '$1']) == ['select $$, $1', None]
+
+
+def test_execute_favorite_query_shlex_error(monkeypatch) -> None:
+    """Unclosed quotes in args should return an error, not crash."""
+    favorite_queries = FakeFavoriteQueries({'demo': 'select $1'})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+
+    results = list(iocommands.execute_favorite_query(FakeCursor(), 'demo "unclosed'))
+    assert len(results) == 1
+    assert 'Cannot parse favorite query arguments' in results[0].status
+
+
+def test_execute_favorite_query_skips_empty_segments(monkeypatch) -> None:
+    """Trailing semicolons or empty segments should be silently skipped."""
+    favorite_queries = FakeFavoriteQueries({'trail': 'select 1;  ;'})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+
+    def fake_special_execute(cur, sql):
+        raise CommandNotFound(sql)
+
+    monkeypatch.setattr(iocommands, 'special_execute', fake_special_execute)
+
+    cursor = FakeCursor({'select 1': [('col',)]})
+    results = list(iocommands.execute_favorite_query(cursor, 'trail'))
+    assert len(results) == 1
+    assert results[0].header == ['col']
+
+
+def test_execute_favorite_query_no_special_false_positive(monkeypatch) -> None:
+    """SQL starting with a word like 'help' in a table name must not be treated as special."""
+    favorite_queries = FakeFavoriteQueries({'q': 'select * from help_topics'})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+
+    def fake_special_execute(cur, sql):
+        raise CommandNotFound(sql)
+
+    monkeypatch.setattr(iocommands, 'special_execute', fake_special_execute)
+
+    cursor = FakeCursor({'select * from help_topics': [('id',)]})
+    results = list(iocommands.execute_favorite_query(cursor, 'q'))
+    assert len(results) == 1
+    assert results[0].header == ['id']
+    assert cursor.executed == ['select * from help_topics']
+
+
+def test_execute_favorite_query_preamble_disabled(monkeypatch) -> None:
+    """When show_favorite_query is False, preamble must be None."""
+    favorite_queries = FakeFavoriteQueries({'q': 'select 1'})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+
+    def fake_special_execute(cur, sql):
+        raise CommandNotFound(sql)
+
+    monkeypatch.setattr(iocommands, 'special_execute', fake_special_execute)
+    iocommands.set_show_favorite_query(False)
+
+    cursor = FakeCursor({'select 1': [('col',)]})
+    results = list(iocommands.execute_favorite_query(cursor, 'q'))
+    assert len(results) == 1
+    assert results[0].preamble is None
+    assert results[0].header == ['col']

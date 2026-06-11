@@ -20,8 +20,7 @@ from mycli.compat import WIN
 from mycli.packages.interactive_utils import confirm_destructive_query
 from mycli.packages.special.delimitercommand import DelimiterCommand
 from mycli.packages.special.favoritequeries import FavoriteQueries
-from mycli.packages.special.main import COMMANDS as SPECIAL_COMMANDS
-from mycli.packages.special.main import ArgType, SpecialCommandAlias, special_command
+from mycli.packages.special.main import ArgType, CommandNotFound, SpecialCommandAlias, special_command
 from mycli.packages.special.main import execute as special_execute
 from mycli.packages.special.utils import handle_cd_command
 from mycli.packages.sqlresult import SQLResult
@@ -337,7 +336,11 @@ def execute_favorite_query(cur: Cursor, arg: str, **_) -> Generator[SQLResult, N
 
     # Parse out favorite name and optional substitution parameters
     name, _separator, arg_str = arg.partition(" ")
-    args = shlex.split(arg_str)
+    try:
+        args = shlex.split(arg_str)
+    except ValueError as e:
+        yield SQLResult(status=f"Cannot parse favorite query arguments: {e}")
+        return
 
     query = FavoriteQueries.instance.get(name)
     if query is None:
@@ -350,18 +353,14 @@ def execute_favorite_query(cur: Cursor, arg: str, **_) -> Generator[SQLResult, N
         else:
             for sql in sqlparse.split(query):
                 sql = sql.rstrip(";")
+                if not sql.strip():
+                    continue
                 preamble = f"> {sql}" if is_show_favorite_query() else None
-                is_special = False
-                for special in SPECIAL_COMMANDS:
-                    if sql.lower().startswith(special.lower()):
-                        is_special = True
-                        break
-                if is_special:
+                try:
                     for result in special_execute(cur, sql):
                         result.preamble = preamble
-                        # special_execute() already returns a SQLResult
                         yield result
-                else:
+                except CommandNotFound:
                     cur.execute(sql)
                     if cur.description:
                         header = [x[0] for x in cur.description]
@@ -385,17 +384,23 @@ def list_favorite_queries() -> list[SQLResult]:
 
 def subst_favorite_query_args(query: str, args: list[str]) -> list[str | None]:
     """replace positional parameters ($1...$N) in query."""
+    # Validate that every provided arg has a matching placeholder
     for idx, val in enumerate(args):
         subst_var = "$" + str(idx + 1)
         if subst_var not in query:
             return [None, "query does not have substitution parameter " + subst_var + ":\n  " + query]
 
-        query = query.replace(subst_var, val)
+    # Check for placeholders beyond provided args
+    for match in re.finditer(r"\$(\d+)", query):
+        idx = int(match.group(1))
+        if idx < 1 or idx > len(args):
+            return [None, "missing substitution for " + match.group(0) + " in query:\n  " + query]
 
-    match = re.search(r"\$\d+", query)
-    if match:
-        return [None, "missing substitution for " + match.group(0) + " in query:\n  " + query]
+    # One-pass substitution to avoid cascading replacements
+    def replacer(match: re.Match) -> str:
+        return args[int(match.group(1)) - 1]
 
+    query = re.sub(r"\$(\d+)", replacer, query)
     return [query, None]
 
 
