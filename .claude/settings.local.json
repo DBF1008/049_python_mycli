@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m pytest test/pytests/test_schema_prefetcher.py test/pytests/test_client_query.py test/pytests/test_completion_refresher.py test/pytests/test_sqlcompleter.py -x -q -p no:httpbin)",
+      "Bash(ls:*)",
+      "Bash(pip install:*)",
+      "Bash(python3)"
+    ]
+  }
+}
