@@ -70,7 +70,7 @@ def get_included_configs(config_file: str | IO[str]) -> list[str | IO[str]]:
             dirs_split = (s.strip().split()[-1] for s in include_directives)
             dirs = filter(os.path.isdir, dirs_split)
             for dir_ in dirs:
-                for filename in os.listdir(dir_):
+                for filename in sorted(os.listdir(dir_)):
                     if filename.endswith(".cnf"):
                         included_configs.append(os.path.join(dir_, filename))
     except (PermissionError, UnicodeDecodeError):
@@ -92,6 +92,7 @@ def read_config_files(
         config = create_default_config(list_values=list_values)
 
     if ignore_user_options:
+        sanitize_alias_dsn(config)
         return config
 
     _files = copy(files)
@@ -107,6 +108,7 @@ def read_config_files(
             config.merge(_config)
             config.filename = _config.filename
 
+    sanitize_alias_dsn(config)
     return config
 
 
@@ -315,6 +317,30 @@ def strip_matching_quotes(s: str) -> str:
     if isinstance(s, str) and len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
         s = s[1:-1]
     return s
+
+
+def sanitize_alias_dsn(config: ConfigObj) -> None:
+    """Ensure [alias_dsn] values are strings, not lists.
+
+    ConfigObj with list_values=True splits values containing commas
+    into Python lists. DSN URIs may legitimately contain commas (e.g.
+    in passwords like ``mysql://user:p,ass@host/db``), so rejoin them
+    to reconstruct the original URI string.
+
+    Also strips leftover surrounding quotes from string values that
+    ConfigObj may have preserved in edge cases.
+    """
+    if 'alias_dsn' not in config:
+        return
+    alias_dsn = config['alias_dsn']
+    if not hasattr(alias_dsn, 'items'):
+        return
+    for key in list(alias_dsn.keys()):
+        value = alias_dsn[key]
+        if isinstance(value, list):
+            alias_dsn[key] = ','.join(str(v) for v in value)
+        elif isinstance(value, str):
+            alias_dsn[key] = strip_matching_quotes(value)
 
 
 def _remove_pad(line: bytes) -> bytes | Literal[False]:

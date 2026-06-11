@@ -26,6 +26,7 @@ from mycli.config import (
     read_and_decrypt_mylogin_cnf,
     read_config_file,
     read_config_files,
+    sanitize_alias_dsn,
     str_to_bool,
     strip_matching_quotes,
     write_default_config,
@@ -371,3 +372,72 @@ def test_strip_quotes_with_quotes():
 
     s2 = '"Darth Vader said, "Luke, I am your father.""'
     assert s2[1:-1] == strip_matching_quotes(s2)
+
+
+def test_get_included_configs_sorts_files(tmp_path) -> None:
+    """Included .cnf files should be returned in sorted order regardless of filesystem order."""
+    include_dir = tmp_path / 'includes'
+    include_dir.mkdir()
+    (include_dir / 'c_third.cnf').write_text('[main]\nc = 3\n', encoding='utf8')
+    (include_dir / 'a_first.cnf').write_text('[main]\na = 1\n', encoding='utf8')
+    (include_dir / 'b_second.cnf').write_text('[main]\nb = 2\n', encoding='utf8')
+    (include_dir / 'ignore.txt').write_text('skip', encoding='utf8')
+
+    config_path = tmp_path / 'root.cnf'
+    config_path.write_text(f'!includedir {include_dir}\n', encoding='utf8')
+
+    result = get_included_configs(str(config_path))
+    assert result == [
+        str(include_dir / 'a_first.cnf'),
+        str(include_dir / 'b_second.cnf'),
+        str(include_dir / 'c_third.cnf'),
+    ]
+
+
+def test_sanitize_alias_dsn_rejoins_lists() -> None:
+    """DSN values that ConfigObj split into lists should be rejoined with commas."""
+    config = ConfigObj({'alias_dsn': {'myserver': ['mysql://user:p', 'ass@host/db']}})
+    sanitize_alias_dsn(config)
+    assert config['alias_dsn']['myserver'] == 'mysql://user:p,ass@host/db'
+
+
+def test_sanitize_alias_dsn_strips_quotes() -> None:
+    """Quoted string DSN values should have surrounding quotes stripped."""
+    config = ConfigObj({'alias_dsn': {'myserver': '"mysql://user:pass@host/db"'}})
+    sanitize_alias_dsn(config)
+    assert config['alias_dsn']['myserver'] == 'mysql://user:pass@host/db'
+
+
+def test_sanitize_alias_dsn_noop_for_missing_section() -> None:
+    """sanitize_alias_dsn should be a no-op when alias_dsn section is absent."""
+    config = ConfigObj({'main': {'foo': 'bar'}})
+    sanitize_alias_dsn(config)
+    assert 'alias_dsn' not in config
+    assert config['main']['foo'] == 'bar'
+
+
+def test_sanitize_alias_dsn_handles_multiple_commas() -> None:
+    """DSN values with multiple commas should be rejoined correctly."""
+    config = ConfigObj({'alias_dsn': {'srv': ['mysql://u:a', 'b', 'c@h/db']}})
+    sanitize_alias_dsn(config)
+    assert config['alias_dsn']['srv'] == 'mysql://u:a,b,c@h/db'
+
+
+def test_sanitize_alias_dsn_preserves_clean_strings() -> None:
+    """DSN values that are already plain strings should not be altered."""
+    config = ConfigObj({'alias_dsn': {'srv': 'mysql://user:pass@host/db'}})
+    sanitize_alias_dsn(config)
+    assert config['alias_dsn']['srv'] == 'mysql://user:pass@host/db'
+
+
+def test_read_config_files_sanitizes_alias_dsn(monkeypatch) -> None:
+    """Integration: read_config_files should sanitize alias_dsn values with commas."""
+    dsn_config = ConfigObj({'alias_dsn': {'myserver': ['mysql://user:p', 'ass@host/db']}})
+    dsn_config.filename = 'dsn.cnf'
+
+    monkeypatch.setattr(config_module, 'create_default_config', lambda list_values=True: ConfigObj({'alias_dsn': {}}))
+    monkeypatch.setattr(config_module, 'read_config_file', lambda filename, list_values=True: dsn_config)
+    monkeypatch.setattr(config_module, 'get_included_configs', lambda filename: [])
+
+    merged = read_config_files(['dsn.cnf'])
+    assert merged['alias_dsn']['myserver'] == 'mysql://user:p,ass@host/db'

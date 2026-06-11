@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest test/pytests/test_config.py -v)",
+      "Bash(ls .venv/bin/python*)",
+      "Bash(ls venv/bin/python*)",
+      "Bash(python3 -m pytest test/pytests/test_config.py -v)",
+      "Bash(python3 -m pytest test/pytests/test_config.py -v -p no:httpbin)",
+      "Bash(python3 -m pytest test/pytests/test_main_modes_list_dsn.py -v -p no:httpbin)",
+      "Bash(python3 -m pytest test/pytests/ -v -p no:httpbin)"
+    ]
+  }
+}
