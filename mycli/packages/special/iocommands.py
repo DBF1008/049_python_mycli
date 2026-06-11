@@ -337,7 +337,11 @@ def execute_favorite_query(cur: Cursor, arg: str, **_) -> Generator[SQLResult, N
 
     # Parse out favorite name and optional substitution parameters
     name, _separator, arg_str = arg.partition(" ")
-    args = shlex.split(arg_str)
+    try:
+        args = shlex.split(arg_str)
+    except ValueError as err:
+        yield SQLResult(status=f"Error parsing arguments: {err}")
+        return
 
     query = FavoriteQueries.instance.get(name)
     if query is None:
@@ -349,7 +353,9 @@ def execute_favorite_query(cur: Cursor, arg: str, **_) -> Generator[SQLResult, N
             yield SQLResult(status=arg_error)
         else:
             for sql in sqlparse.split(query):
-                sql = sql.rstrip(";")
+                sql = sql.strip().rstrip(";").strip()
+                if not sql:
+                    continue
                 preamble = f"> {sql}" if is_show_favorite_query() else None
                 is_special = False
                 for special in SPECIAL_COMMANDS:
@@ -357,10 +363,14 @@ def execute_favorite_query(cur: Cursor, arg: str, **_) -> Generator[SQLResult, N
                         is_special = True
                         break
                 if is_special:
-                    for result in special_execute(cur, sql):
+                    results = list(special_execute(cur, sql))
+                    for result in results:
                         result.preamble = preamble
-                        # special_execute() already returns a SQLResult
                         yield result
+                    if not results and preamble is not None:
+                        # Special command produced no output — emit a
+                        # placeholder so the preamble is still visible.
+                        yield SQLResult(preamble=preamble)
                 else:
                     cur.execute(sql)
                     if cur.description:
@@ -384,13 +394,20 @@ def list_favorite_queries() -> list[SQLResult]:
 
 
 def subst_favorite_query_args(query: str, args: list[str]) -> list[str | None]:
-    """replace positional parameters ($1...$N) in query."""
+    """replace positional parameters ($1...$N) in query.
+
+    Uses regex with a negative-lookahead for digits so that replacing
+    ``$1`` never clobbers ``$10``, ``$11``, etc.
+    """
     for idx, val in enumerate(args):
         subst_var = "$" + str(idx + 1)
-        if subst_var not in query:
+        # Match $N only when NOT followed by another digit — prevents
+        # ``$1`` from partially matching ``$10``.
+        pattern = re.compile(r"\$" + str(idx + 1) + r"(?!\d)")
+        if not pattern.search(query):
             return [None, "query does not have substitution parameter " + subst_var + ":\n  " + query]
 
-        query = query.replace(subst_var, val)
+        query = pattern.sub(val, query)
 
     match = re.search(r"\$\d+", query)
     if match:

@@ -638,6 +638,106 @@ def test_execute_favorite_query_returns_header_for_result_sets(monkeypatch) -> N
     assert results[0].rows is cursor
 
 
+def test_execute_favorite_query_shlex_error(monkeypatch) -> None:
+    """shlex.split failures (e.g. unmatched quotes) must not crash."""
+    favorite_queries = FakeFavoriteQueries({'demo': "select $1"})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+
+    # O'Brien has an unmatched quote — shlex.split raises ValueError
+    results = list(iocommands.execute_favorite_query(FakeCursor(), "demo O'Brien"))
+    assert len(results) == 1
+    assert results[0].status is not None
+    assert 'Error parsing arguments' in results[0].status
+
+
+def test_subst_d1_does_not_clobber_d10() -> None:
+    """Replacing $1 must not touch $10, $11, etc."""
+    # With $1 and $10, replacing only $1 leaves $10 intact → missing error
+    query = 'select $1, $10'
+    result, err = iocommands.subst_favorite_query_args(query, ['aaa'])
+    assert result is None
+    assert 'missing substitution for $10' in err
+
+    # Proper 10-param case: $1 through $10 all replaced correctly, no clobber
+    parts = ', '.join(f'${i}' for i in range(1, 11))
+    vals = [f'v{i}' for i in range(1, 11)]
+    result2, err2 = iocommands.subst_favorite_query_args(parts, vals)
+    assert err2 is None
+    expected = ', '.join(f'v{i}' for i in range(1, 11))
+    assert result2 == expected
+
+
+def test_subst_d10_preserved_when_d1_replaced() -> None:
+    """$10 must survive $1 replacement (verified via intermediate string)."""
+    query = 'select $1, $10'
+    # After $1 is replaced, $10 should remain — the missing-substitution
+    # error must reference $10 (not $1).
+    result, err = iocommands.subst_favorite_query_args(query, ['val1'])
+    assert result is None
+    assert 'missing substitution for $10' in err
+    # The substituted value should be present in the intermediate query
+    assert 'val1' in err
+
+
+def test_execute_favorite_query_skips_empty_statements(monkeypatch) -> None:
+    """Trailing semicolons or whitespace should not produce empty results."""
+    favorite_queries = FakeFavoriteQueries({'trailing': 'select 1;  ;'})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+
+    cursor = FakeCursor({'select 1': None})
+    results = list(iocommands.execute_favorite_query(cursor, 'trailing'))
+    assert len(results) == 1
+    assert results[0].preamble == '> select 1'
+    assert cursor.executed == ['select 1']
+
+
+def test_execute_favorite_query_show_toggle_off(monkeypatch) -> None:
+    """When show_favorite_query is False, preamble must be None for all results."""
+    favorite_queries = FakeFavoriteQueries({'combo': 'help demo; select 1'})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+    monkeypatch.setattr(iocommands, 'SPECIAL_COMMANDS', {'help': object()})
+    monkeypatch.setattr(iocommands, 'special_execute', lambda cur, sql: [SQLResult(status=f'ran {sql}')])
+    monkeypatch.setattr(iocommands, 'SHOW_FAVORITE_QUERY', False)
+
+    cursor = FakeCursor({'select 1': None})
+    results = list(iocommands.execute_favorite_query(cursor, 'combo'))
+
+    assert results[0].preamble is None
+    assert results[1].preamble is None
+
+
+def test_execute_favorite_query_special_returns_no_results(monkeypatch) -> None:
+    """If a special command yields no results, the preamble should still appear."""
+    favorite_queries = FakeFavoriteQueries({'quiet': '\\noop stuff; select 1'})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+    monkeypatch.setattr(iocommands, 'SPECIAL_COMMANDS', {'\\noop': object()})
+    monkeypatch.setattr(iocommands, 'special_execute', lambda cur, sql: [])
+
+    cursor = FakeCursor({'select 1': None})
+    results = list(iocommands.execute_favorite_query(cursor, 'quiet'))
+
+    assert len(results) == 2
+    assert results[0].preamble == '> \\noop stuff'
+    assert results[1].preamble == '> select 1'
+
+
+def test_execute_favorite_query_with_substitution_and_special(monkeypatch) -> None:
+    """Params + special + SQL must all work together consistently."""
+    favorite_queries = FakeFavoriteQueries({'report': "select * from t where month='$1' and region='$2'; \\timing"})
+    monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', favorite_queries, raising=False)
+    monkeypatch.setattr(iocommands, 'SPECIAL_COMMANDS', {'\\timing': object()})
+    monkeypatch.setattr(iocommands, 'special_execute', lambda cur, sql: [SQLResult(status='toggled')])
+
+    cursor = FakeCursor()
+    results = list(iocommands.execute_favorite_query(cursor, "report 2024-01 north"))
+
+    assert len(results) == 2
+    assert results[0].preamble == "> select * from t where month='2024-01' and region='north'"
+    assert cursor.executed == ["select * from t where month='2024-01' and region='north'"]
+    assert results[1].status == 'toggled'
+    assert results[1].preamble == '> \\timing'
+
+
 def test_list_substitute_save_delete_and_redirect_state(tmp_path: Path, monkeypatch) -> None:
     empty_favorites = FakeFavoriteQueries()
     monkeypatch.setattr(iocommands.FavoriteQueries, 'instance', empty_favorites, raising=False)
