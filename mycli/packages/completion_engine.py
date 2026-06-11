@@ -357,7 +357,7 @@ def _emit_where_token(ctx: SuggestContext) -> list[Suggestion]:
     prev_keyword, rewound_text = find_prev_keyword(ctx.text_before_cursor)
     enum_suggestion = _enum_value_suggestion(original_text, ctx.full_text)
     fallback = suggest_based_on_last_token(prev_keyword, rewound_text, None, ctx.full_text, ctx.identifier)
-    if enum_suggestion and _is_where_or_having(prev_keyword):
+    if enum_suggestion and (_is_where_or_having(prev_keyword) or _in_filter_context(original_text)):
         return [enum_suggestion] + fallback
     return fallback
 
@@ -375,7 +375,7 @@ def _emit_binary_or_comma(ctx: SuggestContext) -> list[Suggestion]:
         # perhaps this fallback should include columns
         fallback = _keyword_suggestions()
 
-    if enum_suggestion and _is_where_or_having(prev_keyword):
+    if enum_suggestion and (_is_where_or_having(prev_keyword) or _in_filter_context(original_text)):
         return [enum_suggestion] + fallback
     return fallback
 
@@ -602,6 +602,39 @@ def _charset_suggestion(tokens: list[Token]) -> list[dict[str, str]] | None:
 
 def _is_where_or_having(token: Token | None) -> bool:
     return bool(token and token.value and token.value.lower() in ("where", "having"))
+
+
+def _in_filter_context(text: str) -> bool:
+    """Check if the cursor position is inside a WHERE, HAVING, or ON filter context.
+
+    Unlike :func:`_is_where_or_having` which only inspects the single token
+    returned by :func:`find_prev_keyword`, this helper walks backward through
+    the flattened token stream while tracking parenthesis depth.  It correctly
+    identifies the enclosing filter keyword even when the cursor sits inside
+    parenthesized conditions or after binary operators within ON clauses.
+    """
+    try:
+        parsed = sqlparse.parse(text)[0]
+    except (IndexError, TypeError, ValueError):
+        return False
+
+    flattened = list(parsed.flatten())
+    depth = 0
+    for token in reversed(flattened):
+        if token.value == ')':
+            depth += 1
+        elif token.value == '(':
+            if depth > 0:
+                depth -= 1
+            else:
+                return False
+        elif (
+            depth == 0
+            and token.is_keyword
+            and token.value.upper() in ('WHERE', 'HAVING', 'ON')
+        ):
+            return True
+    return False
 
 
 def _find_doubled_backticks(text: str) -> list[int]:

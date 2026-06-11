@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m pytest test/pytests/test_completion_engine.py -x -q)",
+      "Bash(python3 -m pytest test/pytests/test_completion_engine.py -x -q -p no:httpbin)",
+      "Bash(pip3 install:*)",
+      "Bash(python3 -m pytest test/pytests/test_completion_engine.py test/pytests/test_smart_completion_public_schema_only.py -x -q -p no:httpbin)"
+    ]
+  }
+}
