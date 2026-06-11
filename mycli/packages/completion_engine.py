@@ -18,6 +18,10 @@ _ENUM_VALUE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_LHS_SPLIT_RE = re.compile(
+    r"^(?P<parent>(?:`[^`]+`|[\w$]+))\.(?P<column>(?:`[^`]+`|[\w$]+))$",
+)
+
 # missing because not binary
 #   BETWEEN
 #   CASE
@@ -602,6 +606,24 @@ def _charset_suggestion(tokens: list[Token]) -> list[dict[str, str]] | None:
 
 def _is_where_or_having(token: Token | None) -> bool:
     return bool(token and token.value and token.value.lower() in ("where", "having"))
+
+
+def _find_enclosing_keyword_value(sql: str, max_depth: int = 10) -> str | None:
+    """Find the enclosing SQL keyword, skipping past parentheses.
+
+    ``find_prev_keyword`` stops at ``(`` which loses the real clause context
+    inside parenthesized expressions.  This helper iteratively peels back
+    parentheses to locate the true enclosing keyword (e.g. WHERE / HAVING).
+    """
+    kw, text = find_prev_keyword(sql)
+    depth = 0
+    while kw and kw.value == '(' and depth < max_depth:
+        stripped = text.rstrip()
+        if stripped.endswith('('):
+            stripped = stripped[:-1]
+        kw, text = find_prev_keyword(stripped)
+        depth += 1
+    return kw.value.lower() if kw and kw.value != '(' else None
 
 
 def _find_doubled_backticks(text: str) -> list[int]:
