@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import prompt_toolkit.history; print\\(prompt_toolkit.history.__file__\\)\")",
+      "Bash(pip show:*)",
+      "Bash(python3 -c \"import pyfzf; print\\(pyfzf.__file__\\)\")",
+      "Bash(python3 -c \"import pyfzf.pyfzf; import inspect; print\\(inspect.getfile\\(pyfzf.pyfzf\\)\\)\")",
+      "Bash(python3 -c \"from pyfzf import FzfPrompt; import inspect; print\\(inspect.getsource\\(FzfPrompt\\)\\)\")",
+      "WebSearch"
+    ]
+  }
+}
