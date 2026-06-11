@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 install:*)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(.venv/bin/pip install:*)",
+      "Bash(PYTHONPATH=. python3 -m pytest test/pytests/test_hybrid_redirection.py -v)",
+      "Bash(PYTHONPATH=. python3 -c \"\nimport sqlglot\nfor cmd in [\n    'select 1 \\\\$\\\\$ \\\\$> out.txt',\n    'select 1 \\\\$| cat \\\\$>> out.txt',\n    'select 1 \\\\$> out.txt',\n    'select 1 \\\\$>> out.txt',\n]:\n    tokens = sqlglot.tokenize\\(cmd\\)\n    print\\(f'--- {cmd} ---'\\)\n    for i, t in enumerate\\(tokens\\):\n        print\\(f'  [{i}] {t.token_type.name:20s} text={t.text!r:15s} start={t.start} end={t.end}'\\)\n    print\\(\\)\n\")"
+    ]
+  }
+}

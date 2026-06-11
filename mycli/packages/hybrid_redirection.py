@@ -4,10 +4,8 @@ import logging
 import sqlglot
 
 from mycli.compat import WIN
-from mycli.packages.special.delimitercommand import DelimiterCommand
 
 logger = logging.getLogger(__name__)
-delimiter_command = DelimiterCommand()
 
 
 def find_token_indices(tokens: list[sqlglot.Token]) -> dict[str, list[int]]:
