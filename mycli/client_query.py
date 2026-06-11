@@ -33,8 +33,10 @@ class ClientQueryMixin:
 
     def refresh_completions(self, reset: bool = False) -> list[SQLResult]:
         # Cancel any in-flight schema prefetch before the completer is
-        # replaced.  Loaded-schema bookkeeping is intentionally preserved
-        # so switching between already-loaded schemas does not re-fetch.
+        # replaced.  Cross-schema metadata already present in the live
+        # completer's dbmetadata is preserved by copy_other_schemas_from
+        # in the refresh callback, so switching between already-loaded
+        # schemas does not re-fetch.
         self.schema_prefetcher.stop()
 
         assert self.sqlexecute is not None

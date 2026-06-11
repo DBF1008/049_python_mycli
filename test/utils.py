@@ -172,7 +172,6 @@ def make_bare_mycli() -> Any:
         Any,
         SimpleNamespace(
             stop=lambda: None,
-            clear_loaded=lambda: None,
             start_configured=lambda: None,
             is_prefetching=lambda: False,
             prefetch_schema_now=lambda schema: None,

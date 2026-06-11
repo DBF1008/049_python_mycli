@@ -55,14 +55,9 @@ class SchemaPrefetcher:
         self.mycli = mycli
         self._thread: threading.Thread | None = None
         self._cancel = threading.Event()
-        self._loaded: set[str] = set()
 
     def is_prefetching(self) -> bool:
         return bool(self._thread and self._thread.is_alive())
-
-    def clear_loaded(self) -> None:
-        """Forget which schemas have been prefetched (used on reset)."""
-        self._loaded.clear()
 
     def stop(self, timeout: float = 2.0) -> None:
         """Signal the background thread to stop and wait briefly for it."""
@@ -130,14 +125,18 @@ class SchemaPrefetcher:
                     _logger.error('failed to list databases for prefetch: %r', e)
                     return
             current = self._current_schema()
+            # Derive loaded state from the live completer's metadata — the
+            # single source of truth.  A separate bookkeeping set was prone
+            # to drifting out of sync after completer swaps, which caused
+            # schemas to be silently skipped even though the new completer
+            # had no metadata for them.
             existing = set(self.mycli.completer.dbmetadata.get('tables', {}).keys())
-            queue = [s for s in schemas if s and s != current and s not in self._loaded and s not in existing]
+            queue = [s for s in schemas if s and s != current and s not in existing]
             for schema in queue:
                 if self._cancel.is_set():
                     return
                 try:
                     self._prefetch_one(executor, schema)
-                    self._loaded.add(schema)
                 except Exception as e:
                     _logger.error('prefetch failed for schema %r: %r', schema, e)
         finally:
@@ -155,48 +154,53 @@ class SchemaPrefetcher:
         func_rows = list(executor.functions(schema=schema))
         proc_rows = list(executor.procedures(schema=schema))
 
-        # Use the live completer's escape logic so keys match what the
-        # completion engine computes when parsing user input.
-        completer = self.mycli.completer
-        table_columns: dict[str, list[str]] = {}
-        for table, column in table_rows:
-            esc_table = completer.escape_name(table)
-            esc_col = completer.escape_name(column)
-            cols = table_columns.setdefault(esc_table, ['*'])
-            cols.append(esc_col)
-
-        fk_tables: dict[str, set[str]] = {}
-        fk_relations: list[tuple[str, str, str, str]] = []
-        for table, col, ref_table, ref_col in fk_rows:
-            esc_table = completer.escape_name(table)
-            esc_col = completer.escape_name(col)
-            esc_ref_table = completer.escape_name(ref_table)
-            esc_ref_col = completer.escape_name(ref_col)
-            fk_tables.setdefault(esc_table, set()).add(esc_ref_table)
-            fk_tables.setdefault(esc_ref_table, set()).add(esc_table)
-            fk_relations.append((esc_table, esc_col, esc_ref_table, esc_ref_col))
-        fk_payload: dict[str, Any] = {'tables': fk_tables, 'relations': fk_relations}
-
-        enum_values: dict[str, dict[str, list[str]]] = {}
-        for table, column, values in enum_rows:
-            esc_table = completer.escape_name(table)
-            esc_col = completer.escape_name(column)
-            enum_values.setdefault(esc_table, {})[esc_col] = list(values)
-
-        functions: dict[str, None] = {}
-        for row in func_rows:
-            if not row or not row[0]:
-                continue
-            functions[completer.escape_name(row[0])] = None
-
-        procedures: dict[str, None] = {}
-        for row in proc_rows:
-            if not row or not row[0]:
-                continue
-            procedures[completer.escape_name(row[0])] = None
-
+        # All dict-building and escaping uses a snapshot of the escape
+        # helper (a pure function identical across completer instances).
+        # The live completer reference is captured *inside* the lock so
+        # that the metadata write targets whichever completer is current
+        # at commit time — not one that may have been swapped out by a
+        # concurrent completion refresh.
         with self.mycli._completer_lock:
             live_completer: 'SQLCompleter' = self.mycli.completer
+            escape = live_completer.escape_name
+
+            table_columns: dict[str, list[str]] = {}
+            for table, column in table_rows:
+                esc_table = escape(table)
+                esc_col = escape(column)
+                cols = table_columns.setdefault(esc_table, ['*'])
+                cols.append(esc_col)
+
+            fk_tables: dict[str, set[str]] = {}
+            fk_relations: list[tuple[str, str, str, str]] = []
+            for table, col, ref_table, ref_col in fk_rows:
+                esc_table = escape(table)
+                esc_col = escape(col)
+                esc_ref_table = escape(ref_table)
+                esc_ref_col = escape(ref_col)
+                fk_tables.setdefault(esc_table, set()).add(esc_ref_table)
+                fk_tables.setdefault(esc_ref_table, set()).add(esc_table)
+                fk_relations.append((esc_table, esc_col, esc_ref_table, esc_ref_col))
+            fk_payload: dict[str, Any] = {'tables': fk_tables, 'relations': fk_relations}
+
+            enum_values: dict[str, dict[str, list[str]]] = {}
+            for table, column, values in enum_rows:
+                esc_table = escape(table)
+                esc_col = escape(column)
+                enum_values.setdefault(esc_table, {})[esc_col] = list(values)
+
+            functions: dict[str, None] = {}
+            for row in func_rows:
+                if not row or not row[0]:
+                    continue
+                functions[escape(row[0])] = None
+
+            procedures: dict[str, None] = {}
+            for row in proc_rows:
+                if not row or not row[0]:
+                    continue
+                procedures[escape(row[0])] = None
+
             live_completer.load_schema_metadata(
                 schema=schema,
                 table_columns=table_columns,

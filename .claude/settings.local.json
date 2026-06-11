@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest test/pytests/test_schema_prefetcher.py -v)",
+      "Bash(python3 -m pytest test/pytests/test_schema_prefetcher.py -v)"
+    ]
+  }
+}

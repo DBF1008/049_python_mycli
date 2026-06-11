@@ -215,14 +215,11 @@ def test_start_skips_schemas_already_in_completer(monkeypatch):
     assert mycli.completer.dbmetadata['tables']['keep'] == {'cached_table': ['*', 'c1']}
 
 
-def test_is_prefetching_and_clear_loaded() -> None:
+def test_is_prefetching() -> None:
     mycli = make_mycli()
     prefetcher = SchemaPrefetcher(mycli)
 
     assert prefetcher.is_prefetching() is False
-
-    prefetcher._loaded.update({'alpha', 'beta'})
-    prefetcher.clear_loaded()
 
     class FakeThread:
         def is_alive(self) -> bool:
@@ -230,7 +227,6 @@ def test_is_prefetching_and_clear_loaded() -> None:
 
     prefetcher._thread = FakeThread()
     assert prefetcher.is_prefetching() is True
-    assert prefetcher._loaded == set()
 
 
 def test_stop_joins_alive_thread_and_resets_state() -> None:
@@ -305,7 +301,6 @@ def test_run_returns_when_cancelled_before_prefetch(monkeypatch) -> None:
     prefetcher._run(['schema1'])
 
     prefetch.assert_not_called()
-    assert prefetcher._loaded == set()
     executor.close.assert_called_once_with()
     invalidate.assert_called_once_with()
 
@@ -330,7 +325,6 @@ def test_run_logs_prefetch_error_and_continues(monkeypatch) -> None:
     prefetcher._run(['bad', 'good'])
 
     assert calls == ['bad', 'good']
-    assert prefetcher._loaded == {'good'}
     executor.close.assert_called_once_with()
     invalidate.assert_called_once_with()
 
@@ -374,3 +368,158 @@ def test_invalidate_app_calls_prompt_session_app() -> None:
     prefetcher._invalidate_app()
 
     mycli.prompt_session.app.invalidate.assert_called_once_with()
+
+
+def test_cross_schema_metadata_survives_completer_swap(monkeypatch):
+    """Simulate USE + refresh + swap: previously-prefetched schemas must
+    remain available in the new completer after copy_other_schemas_from."""
+    mycli = make_mycli(prefetch_mode='always', dbname='db1', databases=['db1', 'db2', 'db3'])
+
+    # Phase 1: prefetch db2 and db3 into the initial completer.
+    tables = {
+        'db2': [('users', 'id'), ('users', 'email')],
+        'db3': [('orders', 'id')],
+    }
+    monkeypatch.setattr(
+        schema_prefetcher_module,
+        'SQLExecute',
+        _fake_executor_factory(tables, databases=['db1', 'db2', 'db3']),
+    )
+    prefetcher = SchemaPrefetcher(mycli)
+    prefetcher.start_configured()
+    prefetcher._thread.join(timeout=5)
+
+    assert 'db2' in mycli.completer.dbmetadata['tables']
+    assert 'db3' in mycli.completer.dbmetadata['tables']
+    old_completer = mycli.completer
+
+    # Phase 2: simulate USE db2 → refresh_completions(reset=True).
+    # Build a fresh completer for db2 (what the completion refresher does).
+    new_completer = SQLCompleter(smart_completion=True)
+    new_completer.extend_schemata('db2')
+    new_completer.set_dbname('db2')
+    # Populate db2 tables as the refresher would.
+    new_completer.dbmetadata['tables']['db2'] = {'users': ['*', 'id', 'email']}
+
+    # copy_other_schemas_from (the real callback does this under the lock).
+    new_completer.copy_other_schemas_from(old_completer, exclude='db2')
+
+    # Phase 3: swap.
+    mycli.completer = new_completer
+    mycli.sqlexecute.dbname = 'db2'
+
+    # Cross-schema metadata for db1 and db3 must survive.
+    assert 'db1' in mycli.completer.dbmetadata['tables']
+    assert 'db3' in mycli.completer.dbmetadata['tables']
+    assert 'db3' in mycli.completer.dbmetadata['tables']
+    # db2 must have the fresh data (not whatever old completer had).
+    assert mycli.completer.dbmetadata['tables']['db2'] == {'users': ['*', 'id', 'email']}
+
+    # Phase 4: restart prefetch — it must NOT re-fetch db1 or db3 (already present).
+    tracked: list[str] = []
+
+    def tracking_factory(*_args, **_kwargs):
+        executor = MagicMock()
+
+        def _track(schema=None):
+            tracked.append(schema)
+            return iter([])
+
+        executor.table_columns.side_effect = _track
+        executor.foreign_keys.side_effect = lambda schema=None: iter([])
+        executor.enum_values.side_effect = lambda schema=None: iter([])
+        executor.functions.side_effect = lambda schema=None: iter([])
+        executor.procedures.side_effect = lambda schema=None: iter([])
+        executor.close = MagicMock()
+        return executor
+
+    monkeypatch.setattr(schema_prefetcher_module, 'SQLExecute', tracking_factory)
+
+    prefetcher2 = SchemaPrefetcher(mycli)
+    prefetcher2.start_configured()
+    if prefetcher2._thread is not None:
+        prefetcher2._thread.join(timeout=5)
+
+    # Neither db1 nor db3 should be re-fetched.
+    assert 'db1' not in tracked
+    assert 'db3' not in tracked
+
+
+def test_prefetch_one_writes_to_live_completer_after_swap(monkeypatch):
+    """If the completer is swapped while _prefetch_one is building its
+    payload, the metadata must be written to the *new* (live) completer,
+    not the stale one captured before the lock."""
+    mycli = make_mycli(prefetch_mode='never')
+    old_completer = mycli.completer
+    new_completer = SQLCompleter(smart_completion=True)
+    new_completer.set_dbname('current')
+
+    # Swap the completer mid-way through _prefetch_one.  We use a custom
+    # lock that performs the swap on entry, simulating the race.
+    swap_done = threading.Event()
+
+    class SwapOnEnterLock:
+        def __enter__(self):
+            mycli.completer = new_completer
+            swap_done.set()
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    mycli._completer_lock = SwapOnEnterLock()
+
+    prefetcher = SchemaPrefetcher(mycli)
+
+    executor = MagicMock()
+    executor.table_columns.return_value = iter([('t1', 'c1')])
+    executor.foreign_keys.return_value = iter([])
+    executor.enum_values.return_value = iter([])
+    executor.functions.return_value = iter([])
+    executor.procedures.return_value = iter([])
+
+    prefetcher._prefetch_one(executor, 'other')
+
+    # The metadata must be in the NEW completer, not the old one.
+    assert 'other' in new_completer.dbmetadata['tables']
+    assert 'other' not in old_completer.dbmetadata['tables']
+
+
+def test_no_stale_loaded_set_skips_schemas(monkeypatch):
+    """After a completer swap, schemas that were prefetched into the OLD
+    completer but never transferred must still be fetched — there is no
+    separate ``_loaded`` set that could incorrectly skip them."""
+    mycli = make_mycli(prefetch_mode='listed', prefetch_list=['ghost', 'fresh'])
+
+    # 'ghost' has NO metadata in the current completer (simulating a
+    # schema whose data was lost during a swap).
+    assert 'ghost' not in mycli.completer.dbmetadata['tables']
+
+    tracked: list[str] = []
+
+    def make(*_args, **_kwargs):
+        executor = MagicMock()
+
+        def _track(schema=None):
+            tracked.append(schema)
+            return iter([])
+
+        executor.table_columns.side_effect = _track
+        executor.foreign_keys.side_effect = lambda schema=None: iter([])
+        executor.enum_values.side_effect = lambda schema=None: iter([])
+        executor.functions.side_effect = lambda schema=None: iter([])
+        executor.procedures.side_effect = lambda schema=None: iter([])
+        executor.close = MagicMock()
+        return executor
+
+    monkeypatch.setattr(schema_prefetcher_module, 'SQLExecute', make)
+
+    prefetcher = SchemaPrefetcher(mycli)
+    prefetcher.start_configured()
+    if prefetcher._thread is not None:
+        prefetcher._thread.join(timeout=5)
+
+    # Both 'ghost' and 'fresh' must be fetched — nothing should be skipped
+    # by a stale bookkeeping set.
+    assert 'ghost' in tracked
+    assert 'fresh' in tracked
