@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import prompt_toolkit; import os; print\\(os.path.dirname\\(prompt_toolkit.__file__\\)\\)\")",
+      "Bash(pip show:*)"
+    ]
+  }
+}
