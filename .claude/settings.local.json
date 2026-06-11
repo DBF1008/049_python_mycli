@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest test/pytests/test_hybrid_redirection.py -v)",
+      "Bash(python3 -m pytest test/pytests/test_hybrid_redirection.py -v)",
+      "Bash(python3 -m pytest test/pytests/test_hybrid_redirection.py -v -p no:httpbin)",
+      "Bash(python3 -m pytest test/pytests/test_main_modes_repl.py -v -p no:httpbin)",
+      "Bash(python3 -m pytest test/pytests/test_special_iocommands.py -v -p no:httpbin)",
+      "Bash(python3 -m pytest test/pytests/ -v -p no:httpbin)"
+    ]
+  }
+}

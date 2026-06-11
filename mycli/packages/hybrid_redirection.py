@@ -2,12 +2,11 @@ import functools
 import logging
 
 import sqlglot
+import sqlparse
 
 from mycli.compat import WIN
-from mycli.packages.special.delimitercommand import DelimiterCommand
 
 logger = logging.getLogger(__name__)
-delimiter_command = DelimiterCommand()
 
 
 def find_token_indices(tokens: list[sqlglot.Token]) -> dict[str, list[int]]:
@@ -36,19 +35,37 @@ def find_token_indices(tokens: list[sqlglot.Token]) -> dict[str, list[int]]:
     return token_indices
 
 
+def _count_statements(sql: str, delimiter: str) -> int:
+    """Count SQL statements respecting the current delimiter.
+
+    sqlglot.parse only understands ``;`` as a statement separator, so when the
+    user has switched to a custom delimiter (e.g. ``$$``) we substitute it for
+    ``;`` via sqlparse before counting.
+    """
+    if delimiter == ';':
+        return len(sqlglot.parse(sql, read='mysql'))
+
+    placeholder = '\ufffc'
+    while placeholder in sql:
+        placeholder += placeholder[0]
+    substituted = sql.replace(';', placeholder).replace(delimiter, ';')
+    split = sqlparse.split(substituted)
+    return len([s for s in split if s.strip()])
+
+
 def find_sql_part(
     command: str,
     tokens: list[sqlglot.Token],
     true_dollar_indices: list[int],
+    delimiter: str,
 ):
     leftmost_dollar_pos = tokens[true_dollar_indices[0]].start
-    sql_part = command[0:leftmost_dollar_pos].strip().removesuffix(delimiter_command.current).rstrip()
+    sql_part = command[0:leftmost_dollar_pos].strip().removesuffix(delimiter).rstrip()
     try:
-        statements = sqlglot.parse(sql_part, read='mysql')
+        statement_count = _count_statements(sql_part, delimiter)
     except sqlglot.errors.ParseError:
         return ''
-    if len(statements) != 1:
-        # buglet: the statement count doesn't respect a custom delimiter
+    if statement_count != 1:
         return ''
     return sql_part
 
@@ -93,7 +110,7 @@ def find_file_tokens(
     return file_part_tokens, file_part_index, file_operator_part
 
 
-def assemble_tokens(tokens: list[sqlglot.Token]) -> str:
+def assemble_tokens(tokens: list[sqlglot.Token], delimiter: str) -> str:
     assembled_string = ' ' * (tokens[-1].end + 10)
     for tok in tokens:
         if tok.token_type == sqlglot.TokenType.IDENTIFIER:
@@ -106,7 +123,7 @@ def assemble_tokens(tokens: list[sqlglot.Token]) -> str:
             text = tok.text
             offset = 0
         assembled_string = assembled_string[0 : tok.start] + text + assembled_string[tok.end + offset :]
-    return assembled_string.strip().removesuffix(delimiter_command.current).rstrip()
+    return assembled_string.strip().removesuffix(delimiter).rstrip()
 
 
 def invalid_shell_part(
@@ -125,10 +142,16 @@ def invalid_shell_part(
     return False
 
 
-# todo there are still corner cases combining custom delimiters, caching, and redirection
 @functools.lru_cache(maxsize=1)
-def get_redirect_components(command: str) -> tuple[str | None, str | None, str | None, str | None]:
-    """Get the parts of a hybrid shell-style redirect command."""
+def get_redirect_components(
+    command: str,
+    delimiter: str = ';',
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Get the parts of a hybrid shell-style redirect command.
+
+    *delimiter* is part of the cache key so that switching the statement
+    delimiter automatically invalidates any stale cached result.
+    """
 
     try:
         tokens = sqlglot.tokenize(command)
@@ -155,6 +178,7 @@ def get_redirect_components(command: str) -> tuple[str | None, str | None, str |
         command,
         tokens,
         token_indices['true_dollar'],
+        delimiter,
     )
     if not sql_part:
         return None, None, None, None
@@ -174,12 +198,12 @@ def get_redirect_components(command: str) -> tuple[str | None, str | None, str |
     )
 
     if file_part_tokens:
-        file_part = assemble_tokens(file_part_tokens)
+        file_part = assemble_tokens(file_part_tokens, delimiter)
     else:
         file_part = None
 
     if command_part_tokens:
-        command_part = assemble_tokens(command_part_tokens)
+        command_part = assemble_tokens(command_part_tokens, delimiter)
     else:
         command_part = None
 
@@ -194,11 +218,12 @@ def get_redirect_components(command: str) -> tuple[str | None, str | None, str |
     return sql_part, command_part, file_operator_part, file_part
 
 
-def is_redirect_command(command: str) -> bool:
+def is_redirect_command(command: str, delimiter: str = ';') -> bool:
     """Is this a shell-style redirect to command or file?
 
     :param command: string
+    :param delimiter: current statement delimiter
 
     """
-    sql_part, _command_part, _file_operator_part, _file_part = get_redirect_components(command)
+    sql_part, _command_part, _file_operator_part, _file_part = get_redirect_components(command, delimiter)
     return bool(sql_part)

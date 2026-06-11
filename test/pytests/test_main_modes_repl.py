@@ -245,7 +245,7 @@ def patch_repl_runtime_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repl_mode.special, 'close_tee', lambda: None)
     monkeypatch.setattr(repl_mode, 'handle_editor_command', lambda mycli, text, inputhook, loaded_message_fn: text)
     monkeypatch.setattr(repl_mode, 'handle_clip_command', lambda mycli, text: False)
-    monkeypatch.setattr(repl_mode, 'is_redirect_command', lambda text: False)
+    monkeypatch.setattr(repl_mode, 'is_redirect_command', lambda text, delimiter=';': False)
     monkeypatch.setattr(repl_mode, 'confirm_destructive_query', lambda keywords, text: None)
     monkeypatch.setattr(repl_mode, 'need_completion_refresh', lambda text: False)
     monkeypatch.setattr(repl_mode, 'need_completion_reset', lambda text: False)
@@ -1033,8 +1033,8 @@ def test_one_iteration_covers_redirect_destructive_success_refresh_and_logfile(m
     cli = make_repl_cli(sqlexecute)
     cli.logfile = False
     cli.destructive_warning = True
-    monkeypatch.setattr(repl_mode, 'is_redirect_command', lambda text: text == 'redirect')
-    monkeypatch.setattr(repl_mode, 'get_redirect_components', lambda text: ('dropdb', 'tee', '>', 'out.txt'))
+    monkeypatch.setattr(repl_mode, 'is_redirect_command', lambda text, delimiter=';': text == 'redirect')
+    monkeypatch.setattr(repl_mode, 'get_redirect_components', lambda text, delimiter=';': ('dropdb', 'tee', '>', 'out.txt'))
     redirects: list[tuple[Any, ...]] = []
     monkeypatch.setattr(repl_mode.special, 'set_redirect', lambda *args: redirects.append(args))
     monkeypatch.setattr(
@@ -1208,8 +1208,8 @@ def test_one_iteration_covers_cancel_paths_and_redirect_error(monkeypatch: pytes
             return iter([SQLResult(status='ok')])
 
     cli = make_repl_cli(FakeSQLExecute())
-    monkeypatch.setattr(repl_mode, 'is_redirect_command', lambda text: text == 'redirect-bad')
-    monkeypatch.setattr(repl_mode, 'get_redirect_components', lambda text: ('sql', 'tee', '>', 'out.txt'))
+    monkeypatch.setattr(repl_mode, 'is_redirect_command', lambda text, delimiter=';': text == 'redirect-bad')
+    monkeypatch.setattr(repl_mode, 'get_redirect_components', lambda text, delimiter=';': ('sql', 'tee', '>', 'out.txt'))
     monkeypatch.setattr(repl_mode.special, 'set_redirect', lambda *args: (_ for _ in ()).throw(RuntimeError('redirect boom')))
     repl_mode._one_iteration(cli, repl_mode.ReplState(), 'redirect-bad')
     assert 'redirect boom' in cli.echo_calls[-1]

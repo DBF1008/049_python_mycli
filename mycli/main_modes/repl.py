@@ -673,8 +673,9 @@ def _one_iteration(
     if not text:
         return
 
-    if is_redirect_command(text):
-        sql_part, command_part, file_operator_part, file_part = get_redirect_components(text)
+    delimiter = special.get_current_delimiter()
+    if is_redirect_command(text, delimiter):
+        sql_part, command_part, file_operator_part, file_part = get_redirect_components(text, delimiter)
         text = sql_part or ''
         try:
             special.set_redirect(command_part, file_operator_part, file_part)
