@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest test/pytests/test_main.py::test_list_dsn test/pytests/test_main.py::test_list_dsn_with_comma_in_password test/pytests/test_main.py::test_dsn test/pytests/test_main_modes_list_dsn.py -x -v)",
+      "Bash(ls .venv/bin/python*)",
+      "Bash(find . -name python* -path */bin/*)",
+      "Bash(python3 -m pytest test/pytests/test_config.py -x -v)",
+      "Bash(python3 -m pytest test/pytests/test_main.py::test_list_dsn test/pytests/test_main.py::test_list_dsn_with_comma_in_password test/pytests/test_main_modes_list_dsn.py -x -v)",
+      "Bash(python3 -m pytest test/pytests/test_config.py -x -v -p no:httpbin)",
+      "Bash(python3 -m pytest test/pytests/test_main.py::test_list_dsn test/pytests/test_main.py::test_list_dsn_with_comma_in_password test/pytests/test_main_modes_list_dsn.py -x -v -p no:httpbin)",
+      "Bash(python3 -m pytest test/pytests/ -x -p no:httpbin --timeout=60)",
+      "Bash(python3 -m pytest test/pytests/ -x -p no:httpbin)"
+    ]
+  }
+}

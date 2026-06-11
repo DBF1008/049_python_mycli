@@ -371,3 +371,54 @@ def test_strip_quotes_with_quotes():
 
     s2 = '"Darth Vader said, "Luke, I am your father.""'
     assert s2[1:-1] == strip_matching_quotes(s2)
+
+
+def test_read_config_files_skips_includes_for_failed_parse(monkeypatch) -> None:
+    """When a config file fails to parse (returns None), its !includedir
+    entries must not be expanded."""
+
+    monkeypatch.setattr(
+        config_module, 'create_default_config',
+        lambda list_values=True: ConfigObj({'default': {'a': '1'}}),
+    )
+
+    good = ConfigObj({'main': {'color': 'blue'}})
+    good.filename = 'good.cnf'
+
+    def fake_read(filename, list_values=True):
+        if filename == 'good.cnf':
+            return good
+        return None  # bad.cnf fails to parse
+
+    include_calls: list[str] = []
+
+    def fake_includes(filename):
+        include_calls.append(filename)
+        return []
+
+    monkeypatch.setattr(config_module, 'read_config_file', fake_read)
+    monkeypatch.setattr(config_module, 'get_included_configs', fake_includes)
+
+    merged = read_config_files(['bad.cnf', 'good.cnf'])
+
+    assert 'bad.cnf' not in include_calls
+    assert 'good.cnf' in include_calls
+    assert merged['main']['color'] == 'blue'
+
+
+def test_read_config_file_alias_dsn_with_commas() -> None:
+    """ConfigObj with list_values=True splits comma-containing DSN values
+    into lists.  Callers must rejoin them."""
+
+    f = StringIO(
+        "[alias_dsn]\n"
+        "prod = mysql://user:p,a,ss@host/db\n"
+        "safe = mysql://user:pass@host/db\n"
+    )
+    config = read_config_file(f, list_values=True)
+
+    # With list_values=True, the comma-containing value becomes a list
+    assert isinstance(config['alias_dsn']['prod'], list)
+    # The non-comma value remains a string
+    assert isinstance(config['alias_dsn']['safe'], str)
+    assert config['alias_dsn']['safe'] == 'mysql://user:pass@host/db'

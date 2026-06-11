@@ -102,6 +102,15 @@ class MyCli(AppStateMixin, OutputMixin, ClientCommandsMixin, ClientConnectionMix
         config_files: list[str | IO[str]] = self.system_config_files + [myclirc] + [self.pwd_config_file]
 
         c = self.config = read_config_files(config_files)
+
+        # Fix alias_dsn values that were incorrectly split into lists by
+        # ConfigObj's list_values parsing.  DSN URIs containing commas
+        # (e.g. in passwords) must be preserved as single strings.
+        if 'alias_dsn' in c:
+            for key in c['alias_dsn']:
+                if isinstance(c['alias_dsn'][key], list):
+                    c['alias_dsn'][key] = ','.join(c['alias_dsn'][key])
+
         # this parallel config exists to
         #  * compare with my.cnf
         #  * support the --checkup feature

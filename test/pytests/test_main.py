@@ -942,6 +942,43 @@ def test_list_dsn(monkeypatch):
         print(f"An error occurred while attempting to delete the file: {e}")
 
 
+def test_list_dsn_with_comma_in_password(monkeypatch):
+    """DSN values containing commas (e.g. in passwords) must not be split
+    into lists and must display correctly in --list-dsn output."""
+    monkeypatch.setattr(MyCli, "system_config_files", [])
+    monkeypatch.setattr(MyCli, "pwd_config_file", os.devnull)
+    runner = CliRunner()
+    # keep Windows from locking the file with delete=False
+    with NamedTemporaryFile(prefix=TEMPFILE_PREFIX, mode="w", delete=False) as myclirc:
+        myclirc.write(
+            dedent("""\
+            [alias_dsn]
+            test = mysql://user:p,a,ss@host/db
+            quoted = "mysql://user:p,a,ss@host/db"
+            """)
+        )
+        myclirc.flush()
+        args = ["--list-dsn", "--myclirc", myclirc.name]
+        result = runner.invoke(click_entrypoint, args=args)
+        assert result.exit_code == 0
+        # Both aliases should be listed
+        assert "test" in result.output
+        assert "quoted" in result.output
+
+        result = runner.invoke(click_entrypoint, args=args + ["--verbose"])
+        assert result.exit_code == 0
+        # Unquoted comma DSN must be rejoined into the original string
+        assert "test : mysql://user:p,a,ss@host/db\n" in result.output
+        # Quoted comma DSN is preserved by ConfigObj natively
+        assert "quoted : mysql://user:p,a,ss@host/db\n" in result.output
+
+    try:
+        if os.path.exists(myclirc.name):
+            os.remove(myclirc.name)
+    except Exception:
+        pass
+
+
 @pytest.mark.skipif(os.name == 'nt', reason='todo: unknown')
 def test_list_ssh_config():
     runner = CliRunner()

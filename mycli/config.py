@@ -101,7 +101,7 @@ def read_config_files(
 
         # expand includes only if we were able to parse config
         # (otherwise we'll just encounter the same errors again)
-        if config is not None:
+        if _config is not None:
             _files = get_included_configs(_file) + _files
         if _config is not None:
             config.merge(_config)
